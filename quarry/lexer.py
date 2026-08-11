@@ -28,6 +28,7 @@ class Kind(Enum):
 KEYWORDS = {
     "select", "from", "where", "order", "by",
     "asc", "desc", "limit", "and", "or", "not",
+    "group", "having",
 }
 
 

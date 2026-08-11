@@ -86,6 +86,67 @@ def test_syntax_error_is_a_parse_error(data):
         run("SELECT FROM people", data)
 
 
+def test_count_star_over_whole_file(data):
+    cols, rows = run("SELECT COUNT(*) FROM people", data)
+    assert cols == ["count"]
+    assert rows == [{"count": "4"}]
+
+
+def test_sum_avg_min_max_no_group_by(data):
+    cols, rows = run("SELECT SUM(age), AVG(age), MIN(age), MAX(age) FROM people", data)
+    assert cols == ["sum(age)", "avg(age)", "min(age)", "max(age)"]
+    assert rows == [{"sum(age)": "173", "avg(age)": "43.25", "min(age)": "36", "max(age)": "54"}]
+
+
+def test_min_of_text_column_is_lexical(data):
+    _, rows = run("SELECT MIN(name), MAX(name) FROM people", data)
+    assert rows == [{"min(name)": "ada", "max(name)": "grace"}]
+
+
+def test_count_col_ignores_empty_values(tmp_path):
+    (tmp_path / "t.csv").write_text("name,age\nada,36\nbob,\ncy,41\n", encoding="utf-8")
+    _, rows = run("SELECT COUNT(*), COUNT(age) FROM t", str(tmp_path))
+    assert rows == [{"count": "3", "count(age)": "2"}]
+
+
+def test_group_by_one_column(data):
+    cols, rows = run("SELECT city, COUNT(*) FROM people GROUP BY city", data)
+    assert cols == ["city", "count"]
+    by_city = {r["city"]: r["count"] for r in rows}
+    assert by_city == {"london": "2", "new york": "1", "austin": "1"}
+
+
+def test_group_by_multiple_columns(tmp_path):
+    csv = "city,team,n\nlondon,a,1\nlondon,a,2\nlondon,b,3\nparis,a,4\n"
+    (tmp_path / "g.csv").write_text(csv, encoding="utf-8")
+    _, rows = run("SELECT city, team, SUM(n) FROM g GROUP BY city, team", str(tmp_path))
+    got = {(r["city"], r["team"]): r["sum(n)"] for r in rows}
+    assert got == {("london", "a"): "3", ("london", "b"): "3", ("paris", "a"): "4"}
+
+
+def test_having_filters_groups(data):
+    sql = "SELECT city, COUNT(*) FROM people GROUP BY city HAVING COUNT(*) > 1"
+    _, rows = run(sql, data)
+    assert rows == [{"city": "london", "count": "2"}]
+
+
+def test_order_by_aggregate(data):
+    sql = "SELECT city, COUNT(*) FROM people GROUP BY city ORDER BY count DESC"
+    counts = [r["count"] for r in run(sql, data)[1]]
+    assert counts == ["2", "1", "1"]
+
+
+def test_order_by_aggregate_call_syntax(data):
+    sql = "SELECT city, SUM(age) FROM people GROUP BY city ORDER BY sum(age) DESC LIMIT 1"
+    _, rows = run(sql, data)
+    assert rows == [{"city": "london", "sum(age)": "77"}]
+
+
+def test_plain_column_not_in_group_by_is_an_error(data):
+    with pytest.raises(QueryError):
+        run("SELECT name, COUNT(*) FROM people GROUP BY city", data)
+
+
 def test_quoted_string_with_embedded_quote(tmp_path):
     # The stored value has one apostrophe; the SQL literal 'o''brien' must decode
     # its doubled quote to that single one before the comparison can match.

@@ -27,8 +27,19 @@ directory. Quote a path that contains a dot or a slash.
 - Comparisons that are numeric when both sides look like numbers and lexical
   otherwise, so `age > 30` and `name = 'ada'` both do the expected thing with no
   schema to declare
-- `ORDER BY` a column, ascending or descending
+- `ORDER BY` a column or an aggregate output column, ascending or descending
 - `LIMIT`
+- Aggregates `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `AVG(col)`, `MIN(col)`,
+  `MAX(col)`, with `GROUP BY` over one or more columns and an optional `HAVING`
+  predicate. With an aggregate but no `GROUP BY`, the whole file is one group.
+  `COUNT(*)` counts rows; `COUNT(col)` ignores empty values. `SUM` and `AVG`
+  are numeric and skip non-numeric values. `MIN`/`MAX` are numeric when the
+  column is all numbers, lexical otherwise. A plain column in the SELECT list
+  of an aggregate query must also appear in `GROUP BY`.
+
+Aggregate output columns are named predictably: `COUNT(*)` is `count`, and every
+other aggregate is `func(col)` lowercased, so `SUM(age)` is `sum(age)` and
+`MIN(name)` is `min(name)`. Use those names in `ORDER BY`.
 
 ## How it works
 
@@ -54,7 +65,6 @@ uv run --with pytest python -m pytest
 
 ## Not done yet
 
-- Aggregates (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) and `GROUP BY`
 - Joins across two files
 - Arithmetic inside expressions
 
