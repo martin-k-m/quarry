@@ -30,6 +30,11 @@ from .lexer import Kind, Token, tokenize
 @dataclass(frozen=True)
 class Column:
     name: str
+    table: str | None = None   # the qualifier in table.column, or None if bare
+
+    @property
+    def ref(self) -> str:
+        return f"{self.table}.{self.name}" if self.table else self.name
 
 
 @dataclass(frozen=True)
@@ -68,7 +73,7 @@ AGGREGATES = {"count", "sum", "avg", "min", "max"}
 @dataclass(frozen=True)
 class Aggregate:
     func: str      # lowercased: count, sum, avg, min, max
-    arg: str       # a column name, or "*" for COUNT(*)
+    arg: str       # a column reference, or "*" for COUNT(*)
 
     @property
     def name(self) -> str:
@@ -79,16 +84,33 @@ class Aggregate:
         return f"{self.func}({self.arg})"
 
 
+@dataclass(frozen=True)
+class Alias:
+    # A select item renamed with AS. The item is a column reference (str) or an
+    # Aggregate; name is what the output column is called and what ORDER BY sees.
+    item: object
+    name: str
+
+
+@dataclass(frozen=True)
+class Join:
+    table: str         # the raw table token of the right side
+    left: Column       # one side of the ON equality
+    right: Column      # the other side
+
+
 # ── The statement ────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Query:
-    columns: list[object]           # ["*"], or a list of str names and Aggregate nodes
+    columns: list[object]           # ["*"], or a list of str refs, Aggregate and Alias nodes
     table: str
     where: object | None
     group_by: list[str] | None      # explicit group columns, or None
     having: object | None           # a predicate over aggregates and group columns
     order_by: tuple[str, bool] | None   # (output column name, descending)
     limit: int | None
+    join: Join | None = None        # the single INNER JOIN, or None
+    distinct: bool = False          # SELECT DISTINCT
 
 
 class ParseError(ValueError):
@@ -127,9 +149,27 @@ class _Parser:
     # -- statement --
     def parse(self) -> Query:
         self._eat_keyword("select")
+        distinct = False
+        if self._at_keyword("distinct"):
+            self._next()
+            distinct = True
         columns = self._columns()
         self._eat_keyword("from")
         table = self._table_name()
+
+        join = None
+        if self._at_keyword("inner") or self._at_keyword("join"):
+            if self._at_keyword("inner"):
+                self._next()
+            self._eat_keyword("join")
+            right_table = self._table_name()
+            self._eat_keyword("on")
+            left_key = self._join_key()
+            op = self._expect(Kind.OP).text
+            if op != "=":
+                raise ParseError("JOIN ON supports only equality (=)")
+            right_key = self._join_key()
+            join = Join(right_table, left_key, right_key)
 
         where = None
         if self._at_keyword("where"):
@@ -140,10 +180,10 @@ class _Parser:
         if self._at_keyword("group"):
             self._next()
             self._eat_keyword("by")
-            group_by = [self._expect(Kind.IDENT).text]
+            group_by = [self._column_ref()]
             while self._peek().kind is Kind.COMMA:
                 self._next()
-                group_by.append(self._expect(Kind.IDENT).text)
+                group_by.append(self._column_ref())
 
         having = None
         if self._at_keyword("having"):
@@ -172,7 +212,7 @@ class _Parser:
             limit = int(tok.text)
 
         self._expect(Kind.EOF)
-        return Query(columns, table, where, group_by, having, order_by, limit)
+        return Query(columns, table, where, group_by, having, order_by, limit, join, distinct)
 
     def _columns(self) -> list[object]:
         if self._peek().kind is Kind.STAR:
@@ -186,18 +226,36 @@ class _Parser:
 
     def _select_item(self) -> object:
         agg = self._try_aggregate()
-        if agg is not None:
-            return agg
-        return self._expect(Kind.IDENT).text
+        item = agg if agg is not None else self._column_ref()
+        if self._at_keyword("as"):
+            self._next()
+            return Alias(item, self._expect(Kind.IDENT).text)
+        return item
 
     def _order_column(self) -> str:
-        # ORDER BY may name a plain column or an aggregate output column. For an
-        # aggregate we resolve to its output name, so ORDER BY sum(age) sorts on
-        # the "sum(age)" column and ORDER BY count sorts on COUNT(*).
+        # ORDER BY may name a plain column, an aggregate output column, or an
+        # output alias. For an aggregate we resolve to its output name, so ORDER
+        # BY sum(age) sorts on the "sum(age)" column and ORDER BY count sorts on
+        # COUNT(*).
         agg = self._try_aggregate()
         if agg is not None:
             return agg.name
-        return self._expect(Kind.IDENT).text
+        return self._column_ref()
+
+    def _column_ref(self) -> str:
+        # A bare column name, or a qualified table.column. Returned as written,
+        # so the engine resolves it against the right input.
+        first = self._expect(Kind.IDENT).text
+        if self._peek().kind is Kind.DOT:
+            self._next()
+            second = self._expect(Kind.IDENT).text
+            return f"{first}.{second}"
+        return first
+
+    def _join_key(self) -> Column:
+        ref = self._column_ref()
+        table, _, name = ref.partition(".")
+        return Column(name, table) if "." in ref else Column(ref)
 
     def _try_aggregate(self) -> Aggregate | None:
         # An aggregate is an identifier naming a known function, immediately
@@ -213,7 +271,7 @@ class _Parser:
             self._next()
             arg = "*"
         else:
-            arg = self._expect(Kind.IDENT).text
+            arg = self._column_ref()
         self._expect(Kind.RPAREN)
         return Aggregate(func, arg)
 
@@ -263,7 +321,9 @@ class _Parser:
         if agg is not None:
             return agg
         if tok.kind is Kind.IDENT:
-            return Column(self._next().text)
+            ref = self._column_ref()
+            table, _, name = ref.partition(".")
+            return Column(name, table) if "." in ref else Column(ref)
         if tok.kind is Kind.NUMBER:
             return Literal(float(self._next().text), is_string=False)
         if tok.kind is Kind.STRING:

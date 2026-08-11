@@ -20,6 +20,7 @@ class Kind(Enum):
     OP = auto()      # = != < <= > >=
     STAR = auto()    # * for SELECT * and nothing else, for now
     COMMA = auto()
+    DOT = auto()     # . between a table and a column, as in a.id
     LPAREN = auto()
     RPAREN = auto()
     EOF = auto()
@@ -29,6 +30,7 @@ KEYWORDS = {
     "select", "from", "where", "order", "by",
     "asc", "desc", "limit", "and", "or", "not",
     "group", "having",
+    "distinct", "as", "join", "inner", "on",
 }
 
 
@@ -106,7 +108,10 @@ def tokenize(sql: str) -> list[Token]:
                 continue
             raise LexError(f"stray '!' at column {i + 1}")
 
-        simple = {"*": Kind.STAR, ",": Kind.COMMA, "(": Kind.LPAREN, ")": Kind.RPAREN}
+        simple = {
+            "*": Kind.STAR, ",": Kind.COMMA, ".": Kind.DOT,
+            "(": Kind.LPAREN, ")": Kind.RPAREN,
+        }
         if c in simple:
             tokens.append(Token(simple[c], c, i))
             i += 1

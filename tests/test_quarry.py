@@ -147,6 +147,107 @@ def test_plain_column_not_in_group_by_is_an_error(data):
         run("SELECT name, COUNT(*) FROM people GROUP BY city", data)
 
 
+# ── Qualified column names ───────────────────────────────────────────────────
+def test_qualified_column_resolves_single_table(data):
+    # people.age with one table resolves against that table.
+    cols, rows = run("SELECT people.name, people.age FROM people WHERE people.age > 41", data)
+    assert cols == ["people.name", "people.age"]
+    assert {r["people.name"] for r in rows} == {"grace", "edsger"}
+
+
+def test_qualified_unknown_table_is_a_query_error(data):
+    with pytest.raises(QueryError):
+        run("SELECT other.name FROM people", data)
+
+
+# ── Joins ────────────────────────────────────────────────────────────────────
+@pytest.fixture
+def joined(tmp_path):
+    people = "id,name,city\n1,ada,london\n2,grace,new york\n3,alan,london\n"
+    orders = "id,person,amount\n10,1,50\n11,1,20\n12,3,99\n13,9,5\n"
+    (tmp_path / "people.csv").write_text(people, encoding="utf-8")
+    (tmp_path / "orders.csv").write_text(orders, encoding="utf-8")
+    return str(tmp_path)
+
+
+def test_inner_join_matches_on_key(joined):
+    sql = "SELECT people.name, orders.amount FROM people JOIN orders ON people.id = orders.person"
+    cols, rows = run(sql, joined)
+    assert cols == ["people.name", "orders.amount"]
+    pairs = {(r["people.name"], r["orders.amount"]) for r in rows}
+    # order id 13 has person 9 which matches nobody; grace (id 2) has no order.
+    assert pairs == {("ada", "50"), ("ada", "20"), ("alan", "99")}
+
+
+def test_join_star_exposes_both_sides_qualified(joined):
+    sql = "SELECT * FROM people JOIN orders ON people.id = orders.person"
+    cols, _ = run(sql, joined)
+    assert cols == ["people.id", "people.name", "people.city",
+                    "orders.id", "orders.person", "orders.amount"]
+
+
+def test_join_bare_unambiguous_column_resolves(joined):
+    # name is only on people, amount only on orders, so bare names resolve.
+    sql = "SELECT name, amount FROM people JOIN orders ON people.id = orders.person"
+    _, rows = run(sql, joined)
+    assert {(r["name"], r["amount"]) for r in rows} == {("ada", "50"), ("ada", "20"), ("alan", "99")}
+
+
+def test_join_bare_ambiguous_column_is_a_query_error(joined):
+    # id lives on both sides; a bare reference must be rejected.
+    sql = "SELECT id FROM people JOIN orders ON people.id = orders.person"
+    with pytest.raises(QueryError):
+        run(sql, joined)
+
+
+def test_join_with_where_and_order_by(joined):
+    sql = ("SELECT people.name, orders.amount FROM people JOIN orders "
+           "ON people.id = orders.person WHERE orders.amount > 10 "
+           "ORDER BY orders.amount DESC")
+    _, rows = run(sql, joined)
+    assert [(r["people.name"], r["orders.amount"]) for r in rows] == [
+        ("alan", "99"), ("ada", "50"), ("ada", "20")]
+
+
+def test_join_aggregate_group_by(joined):
+    sql = ("SELECT people.name, SUM(orders.amount) FROM people JOIN orders "
+           "ON people.id = orders.person GROUP BY people.name")
+    _, rows = run(sql, joined)
+    got = {r["people.name"]: r["sum(orders.amount)"] for r in rows}
+    assert got == {"ada": "70", "alan": "99"}
+
+
+# ── DISTINCT ─────────────────────────────────────────────────────────────────
+def test_distinct_dedupes_preserving_first_seen_order(data):
+    rows = rows_of("SELECT DISTINCT city FROM people", data)
+    assert [r["city"] for r in rows] == ["london", "new york", "austin"]
+
+
+def test_distinct_with_order_by(data):
+    rows = rows_of("SELECT DISTINCT city FROM people ORDER BY city ASC", data)
+    assert [r["city"] for r in rows] == ["austin", "london", "new york"]
+
+
+# ── Aliases ──────────────────────────────────────────────────────────────────
+def test_column_alias_renames_output(data):
+    cols, rows = run("SELECT name AS who, age AS years FROM people LIMIT 1", data)
+    assert cols == ["who", "years"]
+    assert rows[0] == {"who": "ada", "years": "36"}
+
+
+def test_aggregate_alias_and_order_by_alias(data):
+    sql = "SELECT city, COUNT(*) AS n FROM people GROUP BY city ORDER BY n DESC"
+    cols, rows = run(sql, data)
+    assert cols == ["city", "n"]
+    assert [r["n"] for r in rows] == ["2", "1", "1"]
+
+
+def test_order_by_column_alias_non_aggregate(data):
+    sql = "SELECT name AS who FROM people ORDER BY who ASC LIMIT 2"
+    rows = rows_of(sql, data)
+    assert [r["who"] for r in rows] == ["ada", "alan"]
+
+
 def test_quoted_string_with_embedded_quote(tmp_path):
     # The stored value has one apostrophe; the SQL literal 'o''brien' must decode
     # its doubled quote to that single one before the comparison can match.

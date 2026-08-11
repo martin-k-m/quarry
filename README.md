@@ -21,7 +21,17 @@ directory. Quote a path that contains a dot or a slash.
 
 ## What it supports
 
-- `SELECT` with a column list or `*`
+- `SELECT` with a column list or `*`, and `SELECT DISTINCT` to drop duplicate
+  output rows, keeping first-seen order
+- Column aliases with `AS`, so `SELECT age AS years` renames the output column
+  and lets `ORDER BY years` refer to it
+- Qualified column names, `table.column`, alongside bare names
+- A single `INNER JOIN` of two CSV files on an equality key,
+  `SELECT ... FROM a JOIN b ON a.k = b.k`, run as a hash join. Output rows carry
+  columns from both sides, named `table.column`. A bare column name resolves
+  when only one side has it; a name both sides carry is ambiguous and must be
+  qualified. `WHERE`, `ORDER BY`, `LIMIT` and aggregates all work on the joined
+  rows.
 - `WHERE` with `=`, `!=`, `<`, `<=`, `>`, `>=`, combined with `AND`, `OR`, `NOT`
   and parentheses
 - Comparisons that are numeric when both sides look like numbers and lexical
@@ -47,9 +57,10 @@ Three stages, one per file:
 
 - `lexer.py` turns the text into a flat stream of tokens.
 - `parser.py` is a recursive-descent parser that builds a query tree.
-- `engine.py` runs that tree as a pipeline of operators: scan, filter, sort,
-  limit, project. Filter and limit stream row by row. Sort is the one step that
-  has to see every input row before it can produce the first output row.
+- `engine.py` runs that tree as a pipeline of operators: scan, optional hash
+  join, filter, sort, limit, project. Filter and limit stream row by row. The
+  sort and the join build side are the steps that have to see every input row
+  before they can produce the first output row.
 
 ## Test
 
@@ -65,8 +76,9 @@ uv run --with pytest python -m pytest
 
 ## Not done yet
 
-- Joins across two files
 - Arithmetic inside expressions
+- Outer joins, and joins of more than two files. The join is a single INNER
+  JOIN of exactly two CSVs on one equality key.
 
 ## License
 
