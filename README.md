@@ -26,12 +26,20 @@ directory. Quote a path that contains a dot or a slash.
 - Column aliases with `AS`, so `SELECT age AS years` renames the output column
   and lets `ORDER BY years` refer to it
 - Qualified column names, `table.column`, alongside bare names
-- A single `INNER JOIN` of two CSV files on an equality key,
+- A single `INNER JOIN` or `LEFT JOIN` of two CSV files on an equality key,
   `SELECT ... FROM a JOIN b ON a.k = b.k`, run as a hash join. Output rows carry
   columns from both sides, named `table.column`. A bare column name resolves
   when only one side has it; a name both sides carry is ambiguous and must be
-  qualified. `WHERE`, `ORDER BY`, `LIMIT` and aggregates all work on the joined
-  rows.
+  qualified. With `LEFT JOIN` (or `LEFT OUTER JOIN`), a left row with no match
+  still appears once, with the right side's columns set to the empty string, the
+  same value a missing CSV field already reads as. `WHERE`, `ORDER BY`, `LIMIT`
+  and aggregates all work on the joined rows.
+- Arithmetic `+`, `-`, `*`, `/` with the usual precedence (`*` and `/` bind
+  tighter than `+` and `-`), unary minus, and parentheses, over numeric values.
+  It works in the `SELECT` list, `WHERE`, `HAVING`, and `ORDER BY`. Division by
+  zero and a non-numeric operand are both query errors. A computed `SELECT`
+  column is named from its expression text, for example `age * 2`, unless
+  renamed with `AS`.
 - `WHERE` with `=`, `!=`, `<`, `<=`, `>`, `>=`, combined with `AND`, `OR`, `NOT`
   and parentheses
 - Comparisons that are numeric when both sides look like numbers and lexical
@@ -76,9 +84,12 @@ uv run --with pytest python -m pytest
 
 ## Not done yet
 
-- Arithmetic inside expressions
-- Outer joins, and joins of more than two files. The join is a single INNER
-  JOIN of exactly two CSVs on one equality key.
+- Arithmetic is numeric only. There is no string concatenation, and no
+  functions over values beyond the aggregates.
+- Joins of more than two files. A join is still a single INNER or LEFT join of
+  exactly two CSVs on one equality key. There is no RIGHT or FULL join.
+- Arithmetic in `ORDER BY` works on a row query, not on a grouped one; an
+  aggregate query still sorts on a selected output column by name.
 
 ## License
 

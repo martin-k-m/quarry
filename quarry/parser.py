@@ -13,10 +13,10 @@ A select item is a column name or an aggregate call: COUNT(*), COUNT(col),
 SUM(col), AVG(col), MIN(col), MAX(col).
 
 The expression grammar has the usual precedence, lowest first: OR, AND, NOT,
-then a single comparison, then a primary (a column, an aggregate call, a
-literal, or a parenthesised expression). Recursive descent mirrors that grammar
-one function per rule, which is why the shape of the code is the shape of the
-language.
+then a single comparison, then arithmetic (additive below multiplicative below
+unary minus), then a primary (a column, an aggregate call, a literal, or a
+parenthesised expression). Recursive descent mirrors that grammar one function
+per rule, which is why the shape of the code is the shape of the language.
 """
 
 from __future__ import annotations
@@ -67,6 +67,57 @@ class Not:
     operand: object
 
 
+@dataclass(frozen=True)
+class BinOp:
+    # An arithmetic node: op is one of + - * /, over numeric operands.
+    op: str
+    left: object
+    right: object
+
+
+@dataclass(frozen=True)
+class Neg:
+    # Unary minus, as in -age or -(a + b).
+    operand: object
+
+
+# Precedence of the arithmetic operators, higher binds tighter. Used only to
+# render a computed column back to readable text for its default name.
+_PREC = {"+": 1, "-": 1, "*": 2, "/": 2}
+
+
+def render_expr(node) -> str:
+    """A readable text form of an expression, used to name a computed column."""
+    if isinstance(node, Column):
+        return node.ref
+    if isinstance(node, Aggregate):
+        return node.name
+    if isinstance(node, Literal):
+        if node.is_string:
+            return "'" + str(node.value).replace("'", "''") + "'"
+        f = float(node.value)
+        return str(int(f)) if f.is_integer() else repr(f)
+    if isinstance(node, Neg):
+        return f"-{_render_child(node.operand, 3, False)}"
+    if isinstance(node, BinOp):
+        left = _render_child(node.left, _PREC[node.op], False)
+        right = _render_child(node.right, _PREC[node.op], True)
+        return f"{left} {node.op} {right}"
+    return str(node)
+
+
+def _render_child(child, parent_prec: int, is_right: bool) -> str:
+    text = render_expr(child)
+    if isinstance(child, BinOp):
+        cp = _PREC[child.op]
+        # Parenthesise a child that binds looser than its parent, or an equal
+        # one on the right of a non-associative operator, so a - (b - c) and
+        # (a + b) * c keep their shape.
+        if cp < parent_prec or (cp == parent_prec and is_right and child.op in "-/"):
+            return f"({text})"
+    return text
+
+
 AGGREGATES = {"count", "sum", "avg", "min", "max"}
 
 
@@ -97,6 +148,7 @@ class Join:
     table: str         # the raw table token of the right side
     left: Column       # one side of the ON equality
     right: Column      # the other side
+    kind: str = "inner"   # "inner" or "left"
 
 
 # ── The statement ────────────────────────────────────────────────────────────
@@ -107,7 +159,8 @@ class Query:
     where: object | None
     group_by: list[str] | None      # explicit group columns, or None
     having: object | None           # a predicate over aggregates and group columns
-    order_by: tuple[str, bool] | None   # (output column name, descending)
+    order_by: tuple[object, bool] | None   # (target, descending); target is an
+                                            # output name str or an expression node
     limit: int | None
     join: Join | None = None        # the single INNER JOIN, or None
     distinct: bool = False          # SELECT DISTINCT
@@ -158,9 +211,15 @@ class _Parser:
         table = self._table_name()
 
         join = None
-        if self._at_keyword("inner") or self._at_keyword("join"):
+        if self._at_keyword("inner") or self._at_keyword("left") or self._at_keyword("join"):
+            kind = "inner"
             if self._at_keyword("inner"):
                 self._next()
+            elif self._at_keyword("left"):
+                self._next()
+                if self._at_keyword("outer"):
+                    self._next()
+                kind = "left"
             self._eat_keyword("join")
             right_table = self._table_name()
             self._eat_keyword("on")
@@ -169,7 +228,7 @@ class _Parser:
             if op != "=":
                 raise ParseError("JOIN ON supports only equality (=)")
             right_key = self._join_key()
-            join = Join(right_table, left_key, right_key)
+            join = Join(right_table, left_key, right_key, kind)
 
         where = None
         if self._at_keyword("where"):
@@ -194,7 +253,7 @@ class _Parser:
         if self._at_keyword("order"):
             self._next()
             self._eat_keyword("by")
-            col = self._order_column()
+            col = self._order_target()
             descending = False
             if self._at_keyword("asc"):
                 self._next()
@@ -225,22 +284,32 @@ class _Parser:
         return items
 
     def _select_item(self) -> object:
-        agg = self._try_aggregate()
-        item = agg if agg is not None else self._column_ref()
+        item = self._item_from_node(self._expr())
         if self._at_keyword("as"):
             self._next()
             return Alias(item, self._expect(Kind.IDENT).text)
         return item
 
-    def _order_column(self) -> str:
-        # ORDER BY may name a plain column, an aggregate output column, or an
-        # output alias. For an aggregate we resolve to its output name, so ORDER
-        # BY sum(age) sorts on the "sum(age)" column and ORDER BY count sorts on
-        # COUNT(*).
-        agg = self._try_aggregate()
-        if agg is not None:
-            return agg.name
-        return self._column_ref()
+    def _item_from_node(self, node) -> object:
+        # A select item stays a bare string for a plain column (so the output
+        # column keeps its written name) and an Aggregate for a bare aggregate.
+        # Anything with arithmetic in it is kept as an expression node, named
+        # later from its rendered text.
+        if isinstance(node, Column):
+            return node.ref
+        return node
+
+    def _order_target(self) -> object:
+        # ORDER BY may name a plain column, an aggregate output column, an output
+        # alias, or an arithmetic expression. A plain column and an aggregate
+        # resolve to their output name (a str); a computed expression is kept as
+        # a node and evaluated per row.
+        node = self._expr()
+        if isinstance(node, Column):
+            return node.ref
+        if isinstance(node, Aggregate):
+            return node.name
+        return node
 
     def _column_ref(self) -> str:
         # A bare column name, or a qualified table.column. Returned as written,
@@ -282,6 +351,12 @@ class _Parser:
         raise ParseError(f"expected a table name after FROM at column {tok.pos + 1}")
 
     # -- expressions, lowest precedence first --
+    def _expr(self):
+        # The entry point for a value expression that is not a predicate: the
+        # SELECT list and ORDER BY use it, so arithmetic works there without a
+        # surrounding comparison.
+        return self._additive()
+
     def _or(self):
         node = self._and()
         while self._at_keyword("or"):
@@ -303,12 +378,32 @@ class _Parser:
         return self._comparison()
 
     def _comparison(self):
-        left = self._primary()
+        left = self._additive()
         if self._peek().kind is Kind.OP:
             op = self._next().text
-            right = self._primary()
+            right = self._additive()
             return Compare(op, left, right)
         return left
+
+    def _additive(self):
+        node = self._multiplicative()
+        while self._peek().kind in (Kind.PLUS, Kind.MINUS):
+            op = self._next().text
+            node = BinOp(op, node, self._multiplicative())
+        return node
+
+    def _multiplicative(self):
+        node = self._unary()
+        while self._peek().kind in (Kind.STAR, Kind.SLASH):
+            op = "*" if self._next().kind is Kind.STAR else "/"
+            node = BinOp(op, node, self._unary())
+        return node
+
+    def _unary(self):
+        if self._peek().kind is Kind.MINUS:
+            self._next()
+            return Neg(self._unary())
+        return self._primary()
 
     def _primary(self):
         tok = self._peek()

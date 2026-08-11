@@ -21,7 +21,20 @@ from __future__ import annotations
 import csv
 import os
 
-from .parser import Aggregate, Alias, And, Column, Compare, Literal, Not, Or, Query
+from .parser import (
+    Aggregate,
+    Alias,
+    And,
+    BinOp,
+    Column,
+    Compare,
+    Literal,
+    Neg,
+    Not,
+    Or,
+    Query,
+    render_expr,
+)
 
 
 class QueryError(ValueError):
@@ -87,7 +100,9 @@ def _item_name(item) -> str:
         return item.name
     if isinstance(item, Aggregate):
         return item.name
-    return item  # a column reference string, bare or qualified
+    if isinstance(item, str):
+        return item  # a column reference string, bare or qualified
+    return render_expr(item)  # a computed arithmetic expression
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
@@ -146,9 +161,18 @@ def _build_source(query: Query, base_dir: str):
 
     joined: list[dict[str, str]] = []
     for lr in lrows:
-        for rr in buckets.get(_norm(lr[lcol]), []):
+        matches = buckets.get(_norm(lr[lcol]), [])
+        if matches:
+            for rr in matches:
+                row = {f"{la}.{c}": lr[c] for c in lf}
+                row.update({f"{ra}.{c}": rr[c] for c in rf})
+                joined.append(row)
+        elif query.join.kind == "left":
+            # A left row with no match still appears once. The right side's
+            # columns are filled with the empty string, the same value a missing
+            # CSV field reads as, so nothing downstream has to learn a new null.
             row = {f"{la}.{c}": lr[c] for c in lf}
-            row.update({f"{ra}.{c}": rr[c] for c in rf})
+            row.update({f"{ra}.{c}": "" for c in rf})
             joined.append(row)
     return schema, joined
 
@@ -190,32 +214,51 @@ def _norm(v):
 def _project(query: Query, rows, schema: Schema):
     if query.columns == ["*"]:
         keys = schema.all_keys()
-        getters = [(k, k) for k in keys]
+        # ("col", key) reads a stored value; every star column is a plain column.
+        getters = [(k, ("col", k)) for k in keys]
         out_cols = keys
     else:
         getters = []
         out_cols = []
         for item in query.columns:
             expr = _item_expr(item)
-            key = schema.resolve(expr)  # expr is a column reference string here
-            out_cols.append(_item_name(item))
-            getters.append((_item_name(item), key))
+            name = _item_name(item)
+            out_cols.append(name)
+            if isinstance(expr, str):
+                getters.append((name, ("col", schema.resolve(expr))))
+            else:
+                # A computed arithmetic expression, evaluated per row.
+                getters.append((name, ("expr", expr)))
 
     if query.order_by is not None:
-        col, descending = query.order_by
-        rows = _sorted_rows(rows, _order_key(col, query, schema), descending)
+        target, descending = query.order_by
+        rows = _sorted_rows(rows, _order_value(target, query, schema), descending)
 
-    projected = [{name: r[key] for name, key in getters} for r in rows]
+    projected = []
+    for r in rows:
+        out = {}
+        for name, (kind, payload) in getters:
+            if kind == "col":
+                out[name] = r[payload]
+            else:
+                out[name] = _fmt_num(_value(payload, r, schema))
+        projected.append(out)
     return out_cols, projected
 
 
-def _order_key(col: str, query: Query, schema: Schema) -> str:
-    # ORDER BY may name an output alias, or a column (bare or qualified). An
-    # alias maps back to whatever it renamed; anything else resolves directly.
-    for item in query.columns:
-        if isinstance(item, Alias) and item.name == col:
-            return schema.resolve(_item_expr(item))
-    return schema.resolve(col)
+def _order_value(target, query: Query, schema: Schema):
+    # A key function over a raw row for ORDER BY. The target is an output alias,
+    # a column (bare or qualified), or an arithmetic expression node. An alias
+    # maps back to whatever it renamed; a column resolves directly; an
+    # expression is evaluated per row.
+    if isinstance(target, str):
+        for item in query.columns:
+            if isinstance(item, Alias) and item.name == target:
+                return _order_value(_item_expr(item), query, schema)
+        key = schema.resolve(target)
+        return lambda r: r[key]
+    # An expression node (Column, BinOp, Neg, Literal).
+    return lambda r: _value(target, r, schema)
 
 
 # ── Aggregation ──────────────────────────────────────────────────────────────
@@ -223,7 +266,7 @@ def _is_aggregation(query: Query) -> bool:
     return (
         query.group_by is not None
         or query.having is not None
-        or any(isinstance(_item_expr(c), Aggregate) for c in query.columns)
+        or any(_aggregates_in(_item_expr(c)) for c in query.columns)
     )
 
 
@@ -242,11 +285,15 @@ def _aggregate(query: Query, rows, schema: Schema):
                     f"column {expr!r} must appear in GROUP BY or an aggregate"
                 )
 
-    # Every aggregate to compute: those projected, plus any only HAVING names.
-    aggs: list[Aggregate] = [
-        _item_expr(c) for c in query.columns if isinstance(_item_expr(c), Aggregate)
-    ]
-    seen = {a.name for a in aggs}
+    # Every aggregate to compute: those in the SELECT list (including inside a
+    # computed expression), plus any only HAVING names.
+    aggs: list[Aggregate] = []
+    seen: set[str] = set()
+    for c in query.columns:
+        for a in _aggregates_in(_item_expr(c)):
+            if a.name not in seen:
+                aggs.append(a)
+                seen.add(a.name)
     for a in _aggregates_in(query.having):
         if a.name not in seen:
             aggs.append(a)
@@ -275,9 +322,11 @@ def _aggregate(query: Query, rows, schema: Schema):
 
     if query.order_by is not None:
         col, descending = query.order_by
-        if col not in out_cols:
+        # An aggregate query sorts on a selected output column by name. An
+        # arithmetic ORDER BY over grouped rows is not supported.
+        if not isinstance(col, str) or col not in out_cols:
             raise QueryError(f"ORDER BY {col!r} is not a selected output column")
-        result_rows = _sorted_rows(result_rows, col, descending)
+        result_rows = _sorted_rows(result_rows, lambda r, c=col: r[c], descending)
 
     return out_cols, result_rows
 
@@ -286,22 +335,26 @@ def _project_group(columns, group_row, schema: Schema) -> dict:
     out = {}
     for item in columns:
         expr = _item_expr(item)
+        name = _item_name(item)
         if isinstance(expr, Aggregate):
-            out[_item_name(item)] = group_row[expr.name]
+            out[name] = group_row[expr.name]
+        elif isinstance(expr, str):
+            out[name] = group_row[schema.resolve(expr)]
         else:
-            out[_item_name(item)] = group_row[schema.resolve(expr)]
+            # A computed expression over aggregates or group columns.
+            out[name] = _fmt_num(_group_value(expr, group_row, schema))
     return out
 
 
 def _aggregates_in(node) -> list:
     if isinstance(node, Aggregate):
         return [node]
-    if isinstance(node, (And, Or)):
+    if isinstance(node, (And, Or, Compare, BinOp)):
         return _aggregates_in(node.left) + _aggregates_in(node.right)
     if isinstance(node, Not):
         return _aggregates_in(node.operand)
-    if isinstance(node, Compare):
-        return _aggregates_in(node.left) + _aggregates_in(node.right)
+    if isinstance(node, Neg):
+        return _aggregates_in(node.operand)
     return []
 
 
@@ -366,6 +419,14 @@ def _group_value(node, group_row: dict, schema: Schema):
         return group_row[key]
     if isinstance(node, Literal):
         return node.value
+    if isinstance(node, BinOp):
+        return _binop(
+            node.op,
+            _group_value(node.left, group_row, schema),
+            _group_value(node.right, group_row, schema),
+        )
+    if isinstance(node, Neg):
+        return -_require_number(_group_value(node.operand, group_row, schema))
     return _group_truth(node, group_row, schema)
 
 
@@ -415,6 +476,10 @@ def _value(node, row: dict[str, str], schema: Schema):
         return row[schema.resolve(node.ref)]
     if isinstance(node, Literal):
         return node.value
+    if isinstance(node, BinOp):
+        return _binop(node.op, _value(node.left, row, schema), _value(node.right, row, schema))
+    if isinstance(node, Neg):
+        return -_require_number(_value(node.operand, row, schema))
     return _truth(node, row, schema)  # a parenthesised boolean used as a value
 
 
@@ -440,10 +505,38 @@ def _compare(op: str, a, b) -> bool:
     raise QueryError(f"unknown operator {op!r}")  # unreachable via the parser
 
 
-def _sorted_rows(rows: list[dict[str, str]], col: str, descending: bool) -> list[dict[str, str]]:
-    numeric = all(_as_float(r[col]) is not None for r in rows)
-    key = (lambda r: _as_float(r[col])) if numeric else (lambda r: r[col])
-    return sorted(rows, key=key, reverse=descending)
+def _require_number(v) -> float:
+    # Arithmetic is numeric only. A value that does not look like a number is a
+    # query error, the same way an unknown column is, rather than a silent zero.
+    f = _as_float(v)
+    if f is None:
+        raise QueryError(f"arithmetic needs a number, got {v!r}")
+    return f
+
+
+def _binop(op: str, a, b) -> float:
+    x, y = _require_number(a), _require_number(b)
+    if op == "+":
+        return x + y
+    if op == "-":
+        return x - y
+    if op == "*":
+        return x * y
+    if op == "/":
+        if y == 0:
+            raise QueryError("division by zero")
+        return x / y
+    raise QueryError(f"unknown operator {op!r}")  # unreachable via the parser
+
+
+def _sorted_rows(rows, valuefn, descending: bool):
+    # valuefn maps a row to the scalar it sorts by. Sort numerically when every
+    # value is a number, lexically otherwise, matching how comparisons behave.
+    vals = [valuefn(r) for r in rows]
+    numeric = all(_as_float(v) is not None for v in vals)
+    keyf = (lambda pair: _as_float(pair[1])) if numeric else (lambda pair: str(pair[1]))
+    ordered = sorted(zip(rows, vals), key=keyf, reverse=descending)
+    return [r for r, _ in ordered]
 
 
 def _as_float(x):

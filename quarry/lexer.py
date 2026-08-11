@@ -18,7 +18,10 @@ class Kind(Enum):
     NUMBER = auto()
     STRING = auto()
     OP = auto()      # = != < <= > >=
-    STAR = auto()    # * for SELECT * and nothing else, for now
+    STAR = auto()    # * for SELECT *, COUNT(*), and multiplication
+    PLUS = auto()    # + in arithmetic
+    MINUS = auto()   # - in arithmetic, and unary minus
+    SLASH = auto()   # / in arithmetic
     COMMA = auto()
     DOT = auto()     # . between a table and a column, as in a.id
     LPAREN = auto()
@@ -31,6 +34,7 @@ KEYWORDS = {
     "asc", "desc", "limit", "and", "or", "not",
     "group", "having",
     "distinct", "as", "join", "inner", "on",
+    "left", "outer",
 }
 
 
@@ -111,6 +115,7 @@ def tokenize(sql: str) -> list[Token]:
         simple = {
             "*": Kind.STAR, ",": Kind.COMMA, ".": Kind.DOT,
             "(": Kind.LPAREN, ")": Kind.RPAREN,
+            "+": Kind.PLUS, "-": Kind.MINUS, "/": Kind.SLASH,
         }
         if c in simple:
             tokens.append(Token(simple[c], c, i))

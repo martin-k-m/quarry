@@ -248,6 +248,103 @@ def test_order_by_column_alias_non_aggregate(data):
     assert [r["who"] for r in rows] == ["ada", "alan"]
 
 
+# ── Arithmetic ───────────────────────────────────────────────────────────────
+def test_arithmetic_precedence_mul_before_add(data):
+    # 2 + 3 * 4 is 14, not 20, so * must bind tighter than +.
+    cols, rows = run("SELECT age + 3 * 4 AS x FROM people ORDER BY age ASC LIMIT 1", data)
+    assert cols == ["x"]
+    assert rows[0] == {"x": "48"}  # ada, 36 + 12
+
+
+def test_arithmetic_parens_override_precedence(data):
+    rows = rows_of("SELECT (age + 4) * 2 AS x FROM people ORDER BY age ASC LIMIT 1", data)
+    assert rows[0] == {"x": "80"}  # (36 + 4) * 2
+
+
+def test_arithmetic_unary_minus(data):
+    rows = rows_of("SELECT -age AS neg FROM people ORDER BY age ASC LIMIT 1", data)
+    assert rows[0] == {"neg": "-36"}
+
+
+def test_arithmetic_division_is_float(data):
+    rows = rows_of("SELECT age / 8 AS q FROM people ORDER BY age ASC LIMIT 1", data)
+    assert rows[0] == {"q": "4.5"}  # 36 / 8
+
+
+def test_computed_column_default_name_is_expression_text(data):
+    cols, _ = run("SELECT age * 2 FROM people", data)
+    assert cols == ["age * 2"]
+
+
+def test_division_by_zero_is_a_query_error(data):
+    with pytest.raises(QueryError):
+        run("SELECT age / 0 FROM people", data)
+
+
+def test_arithmetic_on_non_numeric_is_a_query_error(data):
+    with pytest.raises(QueryError):
+        run("SELECT name + 1 FROM people", data)
+
+
+def test_arithmetic_in_where(data):
+    # age * 2 > 100 selects ages above 50: only edsger at 54.
+    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE age * 2 > 100", data)}
+    assert names == {"edsger"}
+
+
+def test_arithmetic_in_order_by(data):
+    # 100 - age reverses the age order, so the oldest sorts first.
+    names = [r["name"] for r in rows_of("SELECT name FROM people ORDER BY 100 - age ASC", data)]
+    assert names == ["edsger", "grace", "alan", "ada"]
+
+
+def test_arithmetic_in_having(tmp_path):
+    csv = "city,n\nlondon,10\nlondon,10\nparis,1\n"
+    (tmp_path / "h.csv").write_text(csv, encoding="utf-8")
+    sql = "SELECT city, SUM(n) FROM h GROUP BY city HAVING SUM(n) / 2 > 5"
+    _, rows = run(sql, str(tmp_path))
+    assert rows == [{"city": "london", "sum(n)": "20"}]
+
+
+# ── LEFT JOIN ────────────────────────────────────────────────────────────────
+def test_left_join_keeps_unmatched_left_rows_with_empty_right(joined):
+    sql = "SELECT people.name, orders.amount FROM people LEFT JOIN orders ON people.id = orders.person"
+    _, rows = run(sql, joined)
+    pairs = {(r["people.name"], r["orders.amount"]) for r in rows}
+    # ada has two orders, alan one, grace none (empty amount); order 13 drops out.
+    assert pairs == {("ada", "50"), ("ada", "20"), ("alan", "99"), ("grace", "")}
+
+
+def test_left_join_matched_rows_are_correct(joined):
+    sql = "SELECT people.name, orders.amount FROM people LEFT JOIN orders ON people.id = orders.person"
+    _, rows = run(sql, joined)
+    ada = sorted(r["orders.amount"] for r in rows if r["people.name"] == "ada")
+    assert ada == ["20", "50"]
+
+
+def test_left_join_outer_keyword_is_accepted(joined):
+    sql = "SELECT people.name FROM people LEFT OUTER JOIN orders ON people.id = orders.person"
+    _, rows = run(sql, joined)
+    assert {r["people.name"] for r in rows} == {"ada", "alan", "grace"}
+
+
+def test_left_join_with_where_on_left_column(joined):
+    # A WHERE on a left column keeps the unmatched row when it qualifies.
+    sql = ("SELECT people.name, orders.amount FROM people LEFT JOIN orders "
+           "ON people.id = orders.person WHERE people.city = 'new york'")
+    _, rows = run(sql, joined)
+    assert rows == [{"people.name": "grace", "orders.amount": ""}]
+
+
+def test_left_join_aggregation_counts_matches_only(joined):
+    # COUNT(orders.amount) ignores the empty right side, so grace counts zero.
+    sql = ("SELECT people.name, COUNT(orders.amount) FROM people LEFT JOIN orders "
+           "ON people.id = orders.person GROUP BY people.name")
+    _, rows = run(sql, joined)
+    got = {r["people.name"]: r["count(orders.amount)"] for r in rows}
+    assert got == {"ada": "2", "alan": "1", "grace": "0"}
+
+
 def test_quoted_string_with_embedded_quote(tmp_path):
     # The stored value has one apostrophe; the SQL literal 'o''brien' must decode
     # its doubled quote to that single one before the comparison can match.
