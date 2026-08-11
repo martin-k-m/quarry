@@ -18,7 +18,7 @@ class Kind(Enum):
     NUMBER = auto()
     STRING = auto()
     OP = auto()      # = != < <= > >=
-    STAR = auto()    # * — SELECT * and nothing else, for now
+    STAR = auto()    # * for SELECT * and nothing else, for now
     COMMA = auto()
     LPAREN = auto()
     RPAREN = auto()

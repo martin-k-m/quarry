@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         cols, rows = run(argv[0])
-    except Exception as e:  # noqa: BLE001 — the CLI turns any query error into a message
+    except Exception as e:  # noqa: BLE001: the CLI turns any query error into a message
         print(f"error: {e}", file=sys.stderr)
         return 1
     print(_format(cols, rows))

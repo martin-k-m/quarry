@@ -1,4 +1,4 @@
-"""quarry — a small SQL query engine over CSV files."""
+"""quarry, a small SQL query engine over CSV files."""
 
 from __future__ import annotations
 

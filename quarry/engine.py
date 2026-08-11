@@ -20,7 +20,7 @@ from .parser import Aggregate, And, Column, Compare, Literal, Not, Or, Query
 
 
 class QueryError(ValueError):
-    """A query that parses but cannot run — an unknown column, a missing file."""
+    """A query that parses but cannot run, like an unknown column or a missing file."""
 
 
 def execute(query: Query, base_dir: str = ".") -> tuple[list[str], list[dict[str, str]]]:
