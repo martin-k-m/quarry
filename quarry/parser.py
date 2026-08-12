@@ -23,9 +23,24 @@ function per rule, which is why the shape of the code is the shape of the langua
 
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 
 from .lexer import Kind, Token, tokenize
+
+# The deepest an expression tree may nest. A pathologically nested expression
+# (deep parentheses, a long `a + a + ...` chain, stacked NOTs) would otherwise
+# exhaust the interpreter stack and raise a bare RecursionError instead of a
+# clean, explainable error.
+#
+# The binding case is parentheses: each level re-enters the full precedence
+# ladder (_or -> _and -> _not -> _comparison -> _additive -> _multiplicative ->
+# _unary -> _primary), roughly eight Python frames per level. At 100 that peaks
+# near 800 frames, a safe margin under CPython's ~1000-frame default, while the
+# downstream tree-walkers (one to three frames per level) stay well clear at the
+# same depth. Real queries nest a handful of levels, so 100 only ever rejects
+# the adversarial case.
+_MAX_EXPR_DEPTH = 100
 
 
 # ── Expression nodes ─────────────────────────────────────────────────────────
@@ -214,6 +229,26 @@ class _Parser:
     def __init__(self, tokens: list[Token]):
         self.tokens = tokens
         self.i = 0
+        self._depth = 0   # current expression nesting; guarded by _descend
+
+    @contextmanager
+    def _descend(self):
+        """Count one level of expression nesting, rejecting a tree too deep to
+        walk safely. Used at every point the expression grammar goes a level
+        deeper: a parsed operator, a recursion into parentheses, a NOT, a unary
+        minus, or a function argument. Because it decrements on exit, the count
+        tracks the depth of the path currently being built, so it bounds the
+        real tree depth regardless of whether the shape came from recursion or
+        from a left-associative loop."""
+        self._depth += 1
+        if self._depth > _MAX_EXPR_DEPTH:
+            raise ParseError(
+                f"expression nested too deeply (limit {_MAX_EXPR_DEPTH})"
+            )
+        try:
+            yield
+        finally:
+            self._depth -= 1
 
     # -- token helpers --
     def _peek(self) -> Token:
@@ -395,10 +430,11 @@ class _Parser:
             return None
         name = self._next().text.lower()
         self._next()  # the "("
-        args = [self._expr()]
-        while self._peek().kind is Kind.COMMA:
-            self._next()
-            args.append(self._expr())
+        with self._descend():
+            args = [self._expr()]
+            while self._peek().kind is Kind.COMMA:
+                self._next()
+                args.append(self._expr())
         self._expect(Kind.RPAREN)
         return Func(name, tuple(args))
 
@@ -417,22 +453,27 @@ class _Parser:
 
     def _or(self):
         node = self._and()
-        while self._at_keyword("or"):
-            self._next()
-            node = Or(node, self._and())
+        with ExitStack() as spine:
+            while self._at_keyword("or"):
+                spine.enter_context(self._descend())
+                self._next()
+                node = Or(node, self._and())
         return node
 
     def _and(self):
         node = self._not()
-        while self._at_keyword("and"):
-            self._next()
-            node = And(node, self._not())
+        with ExitStack() as spine:
+            while self._at_keyword("and"):
+                spine.enter_context(self._descend())
+                self._next()
+                node = And(node, self._not())
         return node
 
     def _not(self):
         if self._at_keyword("not"):
             self._next()
-            return Not(self._not())
+            with self._descend():
+                return Not(self._not())
         return self._comparison()
 
     def _comparison(self):
@@ -490,29 +531,35 @@ class _Parser:
 
     def _additive(self):
         node = self._multiplicative()
-        while self._peek().kind in (Kind.PLUS, Kind.MINUS):
-            op = self._next().text
-            node = BinOp(op, node, self._multiplicative())
+        with ExitStack() as spine:
+            while self._peek().kind in (Kind.PLUS, Kind.MINUS):
+                spine.enter_context(self._descend())
+                op = self._next().text
+                node = BinOp(op, node, self._multiplicative())
         return node
 
     def _multiplicative(self):
         node = self._unary()
-        while self._peek().kind in (Kind.STAR, Kind.SLASH):
-            op = "*" if self._next().kind is Kind.STAR else "/"
-            node = BinOp(op, node, self._unary())
+        with ExitStack() as spine:
+            while self._peek().kind in (Kind.STAR, Kind.SLASH):
+                spine.enter_context(self._descend())
+                op = "*" if self._next().kind is Kind.STAR else "/"
+                node = BinOp(op, node, self._unary())
         return node
 
     def _unary(self):
         if self._peek().kind is Kind.MINUS:
             self._next()
-            return Neg(self._unary())
+            with self._descend():
+                return Neg(self._unary())
         return self._primary()
 
     def _primary(self):
         tok = self._peek()
         if tok.kind is Kind.LPAREN:
             self._next()
-            node = self._or()
+            with self._descend():
+                node = self._or()
             self._expect(Kind.RPAREN)
             return node
         agg = self._try_aggregate()
