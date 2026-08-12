@@ -40,8 +40,20 @@ directory. Quote a path that contains a dot or a slash.
   zero and a non-numeric operand are both query errors. A computed `SELECT`
   column is named from its expression text, for example `age * 2`, unless
   renamed with `AS`.
+- Scalar functions in an expression, usable in the `SELECT` list, `WHERE`,
+  `HAVING` and `ORDER BY`: `UPPER(x)`, `LOWER(x)`, `LENGTH(x)` over text,
+  `ROUND(x)`, `ROUND(x, n)`, `ABS(x)` over numbers, and `COALESCE(a, b, ...)`
+  which returns the first argument that is neither missing nor empty. The set is
+  fixed. A string function over a value that reads as a number, or a numeric
+  function over text, is a query error, the same way a bad arithmetic operand is.
+  A computed function column is named from its expression text, for example
+  `UPPER(name)`, unless renamed with `AS`.
 - `WHERE` with `=`, `!=`, `<`, `<=`, `>`, `>=`, combined with `AND`, `OR`, `NOT`
   and parentheses
+- `IN` and `NOT IN` against a literal list, in `WHERE` and `HAVING`, as in
+  `city IN ('london', 'paris')` or `age NOT IN (30, 40)`. Membership uses the
+  same numeric-when-both-look-numeric, lexical-otherwise rule as `=`, so the list
+  may hold numbers or strings.
 - Comparisons that are numeric when both sides look like numbers and lexical
   otherwise, so `age > 30` and `name = 'ada'` both do the expected thing with no
   schema to declare
@@ -84,8 +96,14 @@ uv run --with pytest python -m pytest
 
 ## Not done yet
 
-- Arithmetic is numeric only. There is no string concatenation, and no
-  functions over values beyond the aggregates.
+- Arithmetic is numeric only. There is no string concatenation. The scalar
+  function set is fixed at the seven listed above; there is no way to register
+  more, and no user-defined functions.
+- `IN` takes a literal list only, not a subquery. There is no `IN (SELECT ...)`.
+- The string functions decide a wrong argument type by whether the value reads
+  as a number, the engine's only notion of type. A text column whose values all
+  happen to be digits is therefore treated as numeric, so `UPPER` over it is a
+  query error rather than a no-op.
 - Joins of more than two files. A join is still a single INNER or LEFT join of
   exactly two CSVs on one equality key. There is no RIGHT or FULL join.
 - Arithmetic in `ORDER BY` works on a row query, not on a grouped one; an

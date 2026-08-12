@@ -13,10 +13,12 @@ A select item is a column name or an aggregate call: COUNT(*), COUNT(col),
 SUM(col), AVG(col), MIN(col), MAX(col).
 
 The expression grammar has the usual precedence, lowest first: OR, AND, NOT,
-then a single comparison, then arithmetic (additive below multiplicative below
-unary minus), then a primary (a column, an aggregate call, a literal, or a
-parenthesised expression). Recursive descent mirrors that grammar one function
-per rule, which is why the shape of the code is the shape of the language.
+then a single comparison (or an IN / NOT IN membership test against a literal
+list), then arithmetic (additive below multiplicative below unary minus), then a
+primary (a column, an aggregate call, a scalar function call, a literal, or a
+parenthesised expression). A scalar function is any name followed by "(" that is
+not one of the fixed aggregates. Recursive descent mirrors that grammar one
+function per rule, which is why the shape of the code is the shape of the language.
 """
 
 from __future__ import annotations
@@ -81,6 +83,23 @@ class Neg:
     operand: object
 
 
+@dataclass(frozen=True)
+class Func:
+    # A scalar function call, name(arg, ...). The name is any identifier that is
+    # not one of the fixed aggregates; the engine knows the set it can run.
+    name: str          # lowercased: upper, lower, length, round, abs, coalesce
+    args: tuple        # a tuple of argument expression nodes
+
+
+@dataclass(frozen=True)
+class In:
+    # Membership: value IN (items), or value NOT IN (items) when negated. The
+    # items are a literal list, not a subquery.
+    value: object
+    items: tuple       # a tuple of expression nodes, usually literals
+    negated: bool = False
+
+
 # Precedence of the arithmetic operators, higher binds tighter. Used only to
 # render a computed column back to readable text for its default name.
 _PREC = {"+": 1, "-": 1, "*": 2, "/": 2}
@@ -99,6 +118,8 @@ def render_expr(node) -> str:
         return str(int(f)) if f.is_integer() else repr(f)
     if isinstance(node, Neg):
         return f"-{_render_child(node.operand, 3, False)}"
+    if isinstance(node, Func):
+        return f"{node.name.upper()}({', '.join(render_expr(a) for a in node.args)})"
     if isinstance(node, BinOp):
         left = _render_child(node.left, _PREC[node.op], False)
         right = _render_child(node.right, _PREC[node.op], True)
@@ -344,6 +365,24 @@ class _Parser:
         self._expect(Kind.RPAREN)
         return Aggregate(func, arg)
 
+    def _try_func(self) -> Func | None:
+        # A scalar function is an identifier immediately followed by "(", where
+        # the name is not one of the fixed aggregates (those are read first, by
+        # _try_aggregate). The engine decides which names it can actually run.
+        tok = self._peek()
+        if tok.kind is not Kind.IDENT or tok.text.lower() in AGGREGATES:
+            return None
+        if self.tokens[self.i + 1].kind is not Kind.LPAREN:
+            return None
+        name = self._next().text.lower()
+        self._next()  # the "("
+        args = [self._expr()]
+        while self._peek().kind is Kind.COMMA:
+            self._next()
+            args.append(self._expr())
+        self._expect(Kind.RPAREN)
+        return Func(name, tuple(args))
+
     def _table_name(self) -> str:
         tok = self._peek()
         if tok.kind in (Kind.IDENT, Kind.STRING):
@@ -379,11 +418,32 @@ class _Parser:
 
     def _comparison(self):
         left = self._additive()
+        # IN and NOT IN read a literal list and test membership. NOT sits between
+        # the value and IN here, an infix use the prefix NOT rule never sees.
+        if self._at_keyword("in"):
+            return self._in_list(left, negated=False)
+        if self._at_keyword("not") and self._peek_next_is_keyword("in"):
+            self._next()  # the NOT
+            return self._in_list(left, negated=True)
         if self._peek().kind is Kind.OP:
             op = self._next().text
             right = self._additive()
             return Compare(op, left, right)
         return left
+
+    def _peek_next_is_keyword(self, word: str) -> bool:
+        nxt = self.tokens[self.i + 1]
+        return nxt.kind is Kind.KEYWORD and nxt.text.lower() == word
+
+    def _in_list(self, value, negated: bool) -> In:
+        self._eat_keyword("in")
+        self._expect(Kind.LPAREN)
+        items = [self._expr()]
+        while self._peek().kind is Kind.COMMA:
+            self._next()
+            items.append(self._expr())
+        self._expect(Kind.RPAREN)
+        return In(value, tuple(items), negated)
 
     def _additive(self):
         node = self._multiplicative()
@@ -415,6 +475,9 @@ class _Parser:
         agg = self._try_aggregate()
         if agg is not None:
             return agg
+        func = self._try_func()
+        if func is not None:
+            return func
         if tok.kind is Kind.IDENT:
             ref = self._column_ref()
             table, _, name = ref.partition(".")

@@ -34,7 +34,7 @@ KEYWORDS = {
     "asc", "desc", "limit", "and", "or", "not",
     "group", "having",
     "distinct", "as", "join", "inner", "on",
-    "left", "outer",
+    "left", "outer", "in",
 }
 
 

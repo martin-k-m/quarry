@@ -345,6 +345,125 @@ def test_left_join_aggregation_counts_matches_only(joined):
     assert got == {"ada": "2", "alan": "1", "grace": "0"}
 
 
+# ── Scalar functions ─────────────────────────────────────────────────────────
+def test_upper_and_lower(data):
+    rows = rows_of("SELECT UPPER(name) AS u, LOWER(city) AS l FROM people ORDER BY name ASC LIMIT 1", data)
+    assert rows[0] == {"u": "ADA", "l": "london"}
+
+
+def test_length_returns_a_number(data):
+    rows = rows_of("SELECT LENGTH(name) AS n FROM people ORDER BY name ASC LIMIT 1", data)
+    assert rows[0] == {"n": "3"}  # len("ada")
+
+
+def test_upper_of_a_number_is_a_query_error(data):
+    # age reads as numeric, so a string function over it is the wrong type.
+    with pytest.raises(QueryError):
+        run("SELECT UPPER(age) FROM people", data)
+
+
+def test_length_of_a_number_is_a_query_error(data):
+    with pytest.raises(QueryError):
+        run("SELECT LENGTH(age) FROM people", data)
+
+
+def test_round_without_digits(data):
+    rows = rows_of("SELECT ROUND(age / 8) AS r FROM people ORDER BY age ASC LIMIT 1", data)
+    assert rows[0] == {"r": "4"}  # round(36 / 8) = round(4.5) = 4
+
+
+def test_round_with_digits(data):
+    rows = rows_of("SELECT ROUND(age / 8, 2) AS r FROM people ORDER BY age ASC LIMIT 1", data)
+    assert rows[0] == {"r": "4.5"}  # 36 / 8 = 4.5, to two places
+
+
+def test_round_digits_three_places(tmp_path):
+    (tmp_path / "n.csv").write_text("v\n1\n", encoding="utf-8")
+    rows = rows_of("SELECT ROUND(v / 3, 3) AS r FROM n", str(tmp_path))
+    assert rows[0] == {"r": "0.333"}
+
+
+def test_round_of_text_is_a_query_error(data):
+    with pytest.raises(QueryError):
+        run("SELECT ROUND(name) FROM people", data)
+
+
+def test_abs_happy_path(data):
+    rows = rows_of("SELECT ABS(0 - age) AS a FROM people ORDER BY age ASC LIMIT 1", data)
+    assert rows[0] == {"a": "36"}
+
+
+def test_abs_of_text_is_a_query_error(data):
+    with pytest.raises(QueryError):
+        run("SELECT ABS(name) FROM people", data)
+
+
+def test_coalesce_picks_first_present_value(tmp_path):
+    csv = "a,b\n,x\ny,z\n,\n"
+    (tmp_path / "c.csv").write_text(csv, encoding="utf-8")
+    rows = rows_of("SELECT COALESCE(a, b, 'none') AS v FROM c", str(tmp_path))
+    assert [r["v"] for r in rows] == ["x", "y", "none"]
+
+
+def test_function_default_name_is_expression_text(data):
+    cols, _ = run("SELECT UPPER(name) FROM people", data)
+    assert cols == ["UPPER(name)"]
+
+
+def test_function_composed_with_arithmetic(data):
+    # LENGTH returns a number that then takes part in arithmetic.
+    rows = rows_of("SELECT LENGTH(name) * 2 AS n FROM people ORDER BY name ASC LIMIT 1", data)
+    assert rows[0] == {"n": "6"}  # len("ada") * 2
+
+
+def test_function_in_where(data):
+    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE UPPER(city) = 'LONDON'", data)}
+    assert names == {"ada", "alan"}
+
+
+def test_function_in_order_by(data):
+    # Order by name length ascending: ada(3), alan(4), grace(5), edsger(6).
+    names = [r["name"] for r in rows_of("SELECT name FROM people ORDER BY LENGTH(name) ASC", data)]
+    assert names == ["ada", "alan", "grace", "edsger"]
+
+
+# ── IN and NOT IN ────────────────────────────────────────────────────────────
+def test_in_string_list(data):
+    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE city IN ('london', 'austin')", data)}
+    assert names == {"ada", "alan", "edsger"}
+
+
+def test_in_numeric_list(data):
+    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE age IN (36, 42)", data)}
+    assert names == {"ada", "grace"}
+
+
+def test_not_in_list(data):
+    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE age NOT IN (36, 42)", data)}
+    assert names == {"alan", "edsger"}
+
+
+def test_in_combined_with_and_or(data):
+    sql = "SELECT name FROM people WHERE city IN ('london') AND age > 40 OR name = 'grace'"
+    names = {r["name"] for r in rows_of(sql, data)}
+    assert names == {"alan", "grace"}
+
+
+def test_in_uses_numeric_comparison(tmp_path):
+    # "6" and "6.0" match numerically the way = does, not lexically.
+    (tmp_path / "m.csv").write_text("v\n6.0\n7\n", encoding="utf-8")
+    rows = rows_of("SELECT v FROM m WHERE v IN (6)", str(tmp_path))
+    assert [r["v"] for r in rows] == ["6.0"]
+
+
+def test_not_in_in_having(tmp_path):
+    csv = "city,n\nlondon,1\nparis,2\nrome,3\n"
+    (tmp_path / "hh.csv").write_text(csv, encoding="utf-8")
+    sql = "SELECT city, SUM(n) FROM hh GROUP BY city HAVING SUM(n) NOT IN (2)"
+    got = {r["city"]: r["sum(n)"] for r in run(sql, str(tmp_path))[1]}
+    assert got == {"london": "1", "rome": "3"}
+
+
 def test_quoted_string_with_embedded_quote(tmp_path):
     # The stored value has one apostrophe; the SQL literal 'o''brien' must decode
     # its doubled quote to that single one before the comparison can match.

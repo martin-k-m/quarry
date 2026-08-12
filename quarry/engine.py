@@ -28,6 +28,8 @@ from .parser import (
     BinOp,
     Column,
     Compare,
+    Func,
+    In,
     Literal,
     Neg,
     Not,
@@ -241,7 +243,7 @@ def _project(query: Query, rows, schema: Schema):
             if kind == "col":
                 out[name] = r[payload]
             else:
-                out[name] = _fmt_num(_value(payload, r, schema))
+                out[name] = _fmt_value(_value(payload, r, schema))
         projected.append(out)
     return out_cols, projected
 
@@ -342,7 +344,7 @@ def _project_group(columns, group_row, schema: Schema) -> dict:
             out[name] = group_row[schema.resolve(expr)]
         else:
             # A computed expression over aggregates or group columns.
-            out[name] = _fmt_num(_group_value(expr, group_row, schema))
+            out[name] = _fmt_value(_group_value(expr, group_row, schema))
     return out
 
 
@@ -355,6 +357,16 @@ def _aggregates_in(node) -> list:
         return _aggregates_in(node.operand)
     if isinstance(node, Neg):
         return _aggregates_in(node.operand)
+    if isinstance(node, Func):
+        out = []
+        for a in node.args:
+            out += _aggregates_in(a)
+        return out
+    if isinstance(node, In):
+        out = _aggregates_in(node.value)
+        for item in node.items:
+            out += _aggregates_in(item)
+        return out
     return []
 
 
@@ -402,6 +414,8 @@ def _group_truth(node, group_row: dict, schema: Schema) -> bool:
             _group_value(node.left, group_row, schema),
             _group_value(node.right, group_row, schema),
         )
+    if isinstance(node, In):
+        return _in_members(node, lambda n: _group_value(n, group_row, schema))
     v = _group_value(node, group_row, schema)
     f = _as_float(v)
     return f != 0.0 if f is not None else bool(v)
@@ -427,6 +441,8 @@ def _group_value(node, group_row: dict, schema: Schema):
         )
     if isinstance(node, Neg):
         return -_require_number(_group_value(node.operand, group_row, schema))
+    if isinstance(node, Func):
+        return _call_func(node, [_group_value(a, group_row, schema) for a in node.args])
     return _group_truth(node, group_row, schema)
 
 
@@ -465,6 +481,8 @@ def _truth(node, row: dict[str, str], schema: Schema) -> bool:
         return not _truth(node.operand, row, schema)
     if isinstance(node, Compare):
         return _compare(node.op, _value(node.left, row, schema), _value(node.right, row, schema))
+    if isinstance(node, In):
+        return _in_members(node, lambda n: _value(n, row, schema))
     # A bare column or literal in boolean position: truthy if non-zero / non-empty.
     v = _value(node, row, schema)
     f = _as_float(v)
@@ -480,7 +498,16 @@ def _value(node, row: dict[str, str], schema: Schema):
         return _binop(node.op, _value(node.left, row, schema), _value(node.right, row, schema))
     if isinstance(node, Neg):
         return -_require_number(_value(node.operand, row, schema))
+    if isinstance(node, Func):
+        return _call_func(node, [_value(a, row, schema) for a in node.args])
     return _truth(node, row, schema)  # a parenthesised boolean used as a value
+
+
+def _in_members(node: In, valuefn) -> bool:
+    # Membership using the same numeric-or-lexical rule the = operator uses.
+    v = valuefn(node.value)
+    hit = any(_compare("=", v, valuefn(item)) for item in node.items)
+    return (not hit) if node.negated else hit
 
 
 def _compare(op: str, a, b) -> bool:
@@ -527,6 +554,77 @@ def _binop(op: str, a, b) -> float:
             raise QueryError("division by zero")
         return x / y
     raise QueryError(f"unknown operator {op!r}")  # unreachable via the parser
+
+
+_SCALAR_FUNCS = {"upper", "lower", "length", "round", "abs", "coalesce"}
+
+
+def _text_arg(name: str, v):
+    # A string function needs text. A value that looks numeric is the wrong type,
+    # the same duck-typed notion of "numeric" the comparisons and joins use.
+    if _as_float(v) is not None:
+        raise QueryError(f"{name.upper()} needs text, got numeric {v!r}")
+    return str(v)
+
+
+def _num_arg(name: str, v) -> float:
+    f = _as_float(v)
+    if f is None:
+        raise QueryError(f"{name.upper()} needs a number, got {v!r}")
+    return f
+
+
+def _call_func(func: Func, args: list):
+    # args are already-evaluated argument values. The return is a str (for the
+    # text functions and COALESCE) or a float (for the numeric ones); the
+    # projection formats either through _fmt_value.
+    name = func.name
+    if name not in _SCALAR_FUNCS:
+        raise QueryError(f"unknown function {name.upper()}")
+    n = len(args)
+
+    if name in ("upper", "lower", "length"):
+        if n != 1:
+            raise QueryError(f"{name.upper()} takes one argument, got {n}")
+        s = _text_arg(name, args[0])
+        if name == "upper":
+            return s.upper()
+        if name == "lower":
+            return s.lower()
+        return float(len(s))
+
+    if name == "abs":
+        if n != 1:
+            raise QueryError(f"ABS takes one argument, got {n}")
+        return abs(_num_arg("abs", args[0]))
+
+    if name == "round":
+        if n not in (1, 2):
+            raise QueryError(f"ROUND takes one or two arguments, got {n}")
+        x = _num_arg("round", args[0])
+        if n == 1:
+            return float(round(x))
+        digits = _as_float(args[1])
+        if digits is None or not digits.is_integer():
+            raise QueryError(f"ROUND digit count must be a whole number, got {args[1]!r}")
+        return round(x, int(digits))
+
+    # coalesce: the first argument that is present, meaning not missing and not
+    # the empty string. With every argument empty it returns the empty string.
+    if n < 1:
+        raise QueryError("COALESCE needs at least one argument")
+    for a in args:
+        if a is not None and str(a) != "":
+            return a
+    return ""
+
+
+def _fmt_value(v) -> str:
+    # Format a computed value for output: a number the way arithmetic already
+    # renders one, anything else as its string form.
+    if isinstance(v, (int, float)):
+        return _fmt_num(v)
+    return str(v)
 
 
 def _sorted_rows(rows, valuefn, descending: bool):
