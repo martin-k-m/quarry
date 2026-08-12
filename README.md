@@ -19,6 +19,20 @@ python -m quarry "SELECT name, age FROM people.csv WHERE age > 40 ORDER BY age D
 A table name written without a path is resolved to `name.csv` in the working
 directory. Quote a path that contains a dot or a slash.
 
+## Interactive
+
+Run `python -m quarry` with no query argument to open a prompt:
+
+```bash
+python -m quarry
+```
+
+It reads one query per line, runs it against the current working directory, and
+prints the same aligned table the one-shot mode does. A query that fails prints
+the error and the prompt stays open, so a typo does not end the session. Blank
+lines are ignored. Quit with `.exit` or Ctrl-D. Line editing comes from
+`readline` when the platform has it, but it is not required.
+
 ## What it supports
 
 - `SELECT` with a column list or `*`, and `SELECT DISTINCT` to drop duplicate
@@ -54,6 +68,16 @@ directory. Quote a path that contains a dot or a slash.
   `city IN ('london', 'paris')` or `age NOT IN (30, 40)`. Membership uses the
   same numeric-when-both-look-numeric, lexical-otherwise rule as `=`, so the list
   may hold numbers or strings.
+- `LIKE` and `NOT LIKE` pattern matching, in `WHERE` and `HAVING`, as in
+  `name LIKE 'a%'`. `%` matches any run of characters, `_` matches any single
+  character, and a backslash escapes a literal `%` or `_`. Matching is against
+  the string form of the value and is case-sensitive. The literal parts of the
+  pattern are matched literally, so a `.` or `*` in the pattern is just that
+  character.
+- `BETWEEN` and `NOT BETWEEN`, in `WHERE` and `HAVING`, as in
+  `age BETWEEN 30 AND 40`. Both ends are inclusive, and the bounds use the same
+  numeric-or-lexical comparison as the other operators, so numeric and string
+  ranges both work.
 - Comparisons that are numeric when both sides look like numbers and lexical
   otherwise, so `age > 30` and `name = 'ada'` both do the expected thing with no
   schema to declare
@@ -100,6 +124,12 @@ uv run --with pytest python -m pytest
   function set is fixed at the seven listed above; there is no way to register
   more, and no user-defined functions.
 - `IN` takes a literal list only, not a subquery. There is no `IN (SELECT ...)`.
+- `LIKE` is case-sensitive, with no `ILIKE` and no `ESCAPE` clause to pick a
+  different escape character; the escape is always a backslash. It matches the
+  string form of the value, so a numeric column is matched as its text.
+- The REPL runs every query against the current working directory. There is no
+  way to change directories from the prompt, and no history file, multi-line
+  query, or command other than `.exit`.
 - The string functions decide a wrong argument type by whether the value reads
   as a number, the engine's only notion of type. A text column whose values all
   happen to be digits is therefore treated as numeric, so `UPPER` over it is a

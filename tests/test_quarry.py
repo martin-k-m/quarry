@@ -1,3 +1,5 @@
+import io
+
 import pytest
 
 from quarry import ParseError, QueryError, run
@@ -462,6 +464,137 @@ def test_not_in_in_having(tmp_path):
     sql = "SELECT city, SUM(n) FROM hh GROUP BY city HAVING SUM(n) NOT IN (2)"
     got = {r["city"]: r["sum(n)"] for r in run(sql, str(tmp_path))[1]}
     assert got == {"london": "1", "rome": "3"}
+
+
+# ── LIKE and NOT LIKE ────────────────────────────────────────────────────────
+def test_like_percent_prefix(data):
+    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE name LIKE 'a%'", data)}
+    assert names == {"ada", "alan"}
+
+
+def test_like_percent_both_sides(data):
+    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE city LIKE '%o%'", data)}
+    assert names == {"ada", "grace", "alan"}  # london, new york, london
+
+
+def test_like_underscore_single_char(data):
+    # a_a matches a three-letter value starting and ending in a: ada.
+    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE name LIKE 'a_a'", data)}
+    assert names == {"ada"}
+
+
+def test_like_is_case_sensitive(data):
+    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE name LIKE 'A%'", data)}
+    assert names == set()
+
+
+def test_not_like(data):
+    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE name NOT LIKE 'a%'", data)}
+    assert names == {"grace", "edsger"}
+
+
+def test_like_escaped_literal_percent(tmp_path):
+    # A backslash escapes the % so it is matched literally, not as a wildcard.
+    (tmp_path / "p.csv").write_text("v\n50%\n50x\n100%\n", encoding="utf-8")
+    rows = rows_of(r"SELECT v FROM p WHERE v LIKE '50\%'", str(tmp_path))
+    assert [r["v"] for r in rows] == ["50%"]
+
+
+def test_like_regex_metacharacters_are_literal(tmp_path):
+    # A dot in the pattern must match a literal dot, not any character.
+    (tmp_path / "d.csv").write_text("v\na.c\naxc\n", encoding="utf-8")
+    rows = rows_of("SELECT v FROM d WHERE v LIKE 'a.c'", str(tmp_path))
+    assert [r["v"] for r in rows] == ["a.c"]
+
+
+def test_like_in_having(tmp_path):
+    csv = "city,n\nlondon,1\nparis,2\nlisbon,3\n"
+    (tmp_path / "lh.csv").write_text(csv, encoding="utf-8")
+    sql = "SELECT city, SUM(n) FROM lh GROUP BY city HAVING city LIKE 'l%'"
+    got = {r["city"]: r["sum(n)"] for r in run(sql, str(tmp_path))[1]}
+    assert got == {"london": "1", "lisbon": "3"}
+
+
+# ── BETWEEN and NOT BETWEEN ──────────────────────────────────────────────────
+def test_between_numeric_inclusive(data):
+    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE age BETWEEN 36 AND 42", data)}
+    assert names == {"ada", "grace", "alan"}  # 36, 42, 41; 54 excluded
+
+
+def test_between_excludes_out_of_range(data):
+    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE age BETWEEN 40 AND 50", data)}
+    assert names == {"grace", "alan"}  # 42, 41
+
+
+def test_between_lexical(data):
+    # String bounds compare lexically: names from 'a' up to 'b'.
+    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE name BETWEEN 'a' AND 'b'", data)}
+    assert names == {"ada", "alan"}
+
+
+def test_not_between(data):
+    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE age NOT BETWEEN 36 AND 42", data)}
+    assert names == {"edsger"}  # only 54 is outside
+
+
+def test_between_combined_with_and(data):
+    sql = "SELECT name FROM people WHERE age BETWEEN 30 AND 50 AND city = 'london'"
+    names = {r["name"] for r in rows_of(sql, data)}
+    assert names == {"ada", "alan"}
+
+
+def test_between_in_having(tmp_path):
+    csv = "city,n\nlondon,1\nparis,2\nrome,3\n"
+    (tmp_path / "bh.csv").write_text(csv, encoding="utf-8")
+    sql = "SELECT city, SUM(n) FROM bh GROUP BY city HAVING SUM(n) BETWEEN 2 AND 3"
+    got = {r["city"]: r["sum(n)"] for r in run(sql, str(tmp_path))[1]}
+    assert got == {"paris": "2", "rome": "3"}
+
+
+# ── REPL ─────────────────────────────────────────────────────────────────────
+def _run_repl(monkeypatch, capsys, script, cwd):
+    import os
+
+    from quarry.__main__ import main
+
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr("sys.stdin", io.StringIO(script))
+    code = main([])
+    out = capsys.readouterr().out
+    return code, out
+
+
+def test_repl_runs_a_query_and_exits(data, monkeypatch, capsys):
+    code, out = _run_repl(monkeypatch, capsys, "SELECT name FROM people WHERE age > 50\n.exit\n", data)
+    assert code == 0
+    assert "edsger" in out
+    assert "(1 row)" in out
+
+
+def test_repl_banner_is_printed(data, monkeypatch, capsys):
+    code, out = _run_repl(monkeypatch, capsys, ".exit\n", data)
+    assert "quarry" in out.splitlines()[0]
+
+
+def test_repl_bad_query_does_not_stop_session(data, monkeypatch, capsys):
+    script = "SELECT nope FROM people\nSELECT name FROM people WHERE age > 50\n.exit\n"
+    code, out = _run_repl(monkeypatch, capsys, script, data)
+    assert code == 0
+    assert "error:" in out          # the bad query reported an error
+    assert "edsger" in out          # and the next query still ran
+
+
+def test_repl_blank_lines_are_ignored(data, monkeypatch, capsys):
+    code, out = _run_repl(monkeypatch, capsys, "\n\nSELECT COUNT(*) FROM people\n.exit\n", data)
+    assert code == 0
+    assert "(1 row)" in out
+
+
+def test_repl_eof_ends_session(data, monkeypatch, capsys):
+    # No .exit, just EOF after one query.
+    code, out = _run_repl(monkeypatch, capsys, "SELECT COUNT(*) FROM people\n", data)
+    assert code == 0
+    assert "4" in out
 
 
 def test_quoted_string_with_embedded_quote(tmp_path):

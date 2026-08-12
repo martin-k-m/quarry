@@ -92,6 +92,25 @@ class Func:
 
 
 @dataclass(frozen=True)
+class Like:
+    # Pattern match: value LIKE pattern, or value NOT LIKE pattern when negated.
+    # The pattern is an expression, usually a string literal with % and _ wildcards.
+    value: object
+    pattern: object
+    negated: bool = False
+
+
+@dataclass(frozen=True)
+class Between:
+    # Range test: value BETWEEN low AND high, inclusive on both ends, or the
+    # negation when negated. The bounds are expressions.
+    value: object
+    low: object
+    high: object
+    negated: bool = False
+
+
+@dataclass(frozen=True)
 class In:
     # Membership: value IN (items), or value NOT IN (items) when negated. The
     # items are a literal list, not a subquery.
@@ -422,9 +441,19 @@ class _Parser:
         # the value and IN here, an infix use the prefix NOT rule never sees.
         if self._at_keyword("in"):
             return self._in_list(left, negated=False)
+        if self._at_keyword("like"):
+            return self._like(left, negated=False)
+        if self._at_keyword("between"):
+            return self._between(left, negated=False)
         if self._at_keyword("not") and self._peek_next_is_keyword("in"):
             self._next()  # the NOT
             return self._in_list(left, negated=True)
+        if self._at_keyword("not") and self._peek_next_is_keyword("like"):
+            self._next()  # the NOT
+            return self._like(left, negated=True)
+        if self._at_keyword("not") and self._peek_next_is_keyword("between"):
+            self._next()  # the NOT
+            return self._between(left, negated=True)
         if self._peek().kind is Kind.OP:
             op = self._next().text
             right = self._additive()
@@ -444,6 +473,20 @@ class _Parser:
             items.append(self._expr())
         self._expect(Kind.RPAREN)
         return In(value, tuple(items), negated)
+
+    def _like(self, value, negated: bool) -> Like:
+        self._eat_keyword("like")
+        pattern = self._additive()
+        return Like(value, pattern, negated)
+
+    def _between(self, value, negated: bool) -> Between:
+        self._eat_keyword("between")
+        # _additive, not _expr through _or, so the AND below is the BETWEEN
+        # separator and not a boolean conjunction that swallows the upper bound.
+        low = self._additive()
+        self._eat_keyword("and")
+        high = self._additive()
+        return Between(value, low, high, negated)
 
     def _additive(self):
         node = self._multiplicative()

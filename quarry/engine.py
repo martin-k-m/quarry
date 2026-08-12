@@ -20,16 +20,19 @@ from __future__ import annotations
 
 import csv
 import os
+import re
 
 from .parser import (
     Aggregate,
     Alias,
     And,
+    Between,
     BinOp,
     Column,
     Compare,
     Func,
     In,
+    Like,
     Literal,
     Neg,
     Not,
@@ -367,6 +370,10 @@ def _aggregates_in(node) -> list:
         for item in node.items:
             out += _aggregates_in(item)
         return out
+    if isinstance(node, Like):
+        return _aggregates_in(node.value) + _aggregates_in(node.pattern)
+    if isinstance(node, Between):
+        return _aggregates_in(node.value) + _aggregates_in(node.low) + _aggregates_in(node.high)
     return []
 
 
@@ -416,6 +423,10 @@ def _group_truth(node, group_row: dict, schema: Schema) -> bool:
         )
     if isinstance(node, In):
         return _in_members(node, lambda n: _group_value(n, group_row, schema))
+    if isinstance(node, Like):
+        return _like_match(node, lambda n: _group_value(n, group_row, schema))
+    if isinstance(node, Between):
+        return _between_test(node, lambda n: _group_value(n, group_row, schema))
     v = _group_value(node, group_row, schema)
     f = _as_float(v)
     return f != 0.0 if f is not None else bool(v)
@@ -483,6 +494,10 @@ def _truth(node, row: dict[str, str], schema: Schema) -> bool:
         return _compare(node.op, _value(node.left, row, schema), _value(node.right, row, schema))
     if isinstance(node, In):
         return _in_members(node, lambda n: _value(n, row, schema))
+    if isinstance(node, Like):
+        return _like_match(node, lambda n: _value(n, row, schema))
+    if isinstance(node, Between):
+        return _between_test(node, lambda n: _value(n, row, schema))
     # A bare column or literal in boolean position: truthy if non-zero / non-empty.
     v = _value(node, row, schema)
     f = _as_float(v)
@@ -508,6 +523,55 @@ def _in_members(node: In, valuefn) -> bool:
     v = valuefn(node.value)
     hit = any(_compare("=", v, valuefn(item)) for item in node.items)
     return (not hit) if node.negated else hit
+
+
+def _between_test(node: Between, valuefn) -> bool:
+    # Inclusive on both ends, using the same numeric-or-lexical comparison as the
+    # other operators: low <= value AND value <= high.
+    v = valuefn(node.value)
+    lo, hi = valuefn(node.low), valuefn(node.high)
+    hit = _compare("<=", lo, v) and _compare("<=", v, hi)
+    return (not hit) if node.negated else hit
+
+
+def _like_match(node: Like, valuefn) -> bool:
+    v = valuefn(node.value)
+    pattern = valuefn(node.pattern)
+    hit = re.fullmatch(_like_to_regex(str(pattern)), str(v), re.DOTALL) is not None
+    return (not hit) if node.negated else hit
+
+
+def _like_to_regex(pattern: str) -> str:
+    # Translate a SQL LIKE pattern to a regex. A backslash escapes a literal % or
+    # _; % becomes .* and _ becomes any single character. Every run of literal
+    # text is passed through re.escape, so regex metacharacters in the pattern
+    # (like . or *) only ever match themselves.
+    out: list[str] = []
+    i, n = 0, len(pattern)
+    literal: list[str] = []
+
+    def flush():
+        if literal:
+            out.append(re.escape("".join(literal)))
+            literal.clear()
+
+    while i < n:
+        c = pattern[i]
+        if c == "\\" and i + 1 < n and pattern[i + 1] in "%_\\":
+            literal.append(pattern[i + 1])
+            i += 2
+            continue
+        if c == "%":
+            flush()
+            out.append(".*")
+        elif c == "_":
+            flush()
+            out.append(".")
+        else:
+            literal.append(c)
+        i += 1
+    flush()
+    return "".join(out)
 
 
 def _compare(op: str, a, b) -> bool:
