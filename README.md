@@ -1,5 +1,10 @@
 # quarry
 
+[![CI](https://github.com/martin-k-m/quarry/actions/workflows/ci.yml/badge.svg)](https://github.com/martin-k-m/quarry/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Ruff](https://img.shields.io/badge/lint-ruff-blue.svg)](https://github.com/astral-sh/ruff)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A small SQL query engine over CSV files, in Python.
 
 quarry reads a CSV file and runs a subset of SQL over it: `SELECT`, `WHERE`,
