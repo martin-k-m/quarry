@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install tools
-        run: python -m pip install --upgrade pip pytest ruff
+        run: python -m pip install --upgrade pip pytest ruff hypothesis
       # Lint gate. The project already declares a ruff config in pyproject;
       # this runs it so a violation fails the build rather than sitting unseen.
       - name: Lint
