@@ -318,7 +318,7 @@ def _aggregate(query: Query, rows, schema: Schema):
 
     result_rows = []
     for key, members in groups.items():
-        group_row = dict(zip(group_keys, key))
+        group_row = dict(zip(group_keys, key, strict=True))
         for a in aggs:
             group_row[a.name] = _compute(a, members, agg_keys[a.name])
         if query.having is not None and not _group_truth(query.having, group_row, schema):
@@ -410,9 +410,11 @@ def _fmt_num(x: float) -> str:
 
 def _group_truth(node, group_row: dict, schema: Schema) -> bool:
     if isinstance(node, And):
-        return _group_truth(node.left, group_row, schema) and _group_truth(node.right, group_row, schema)
+        return (_group_truth(node.left, group_row, schema)
+                and _group_truth(node.right, group_row, schema))
     if isinstance(node, Or):
-        return _group_truth(node.left, group_row, schema) or _group_truth(node.right, group_row, schema)
+        return (_group_truth(node.left, group_row, schema)
+                or _group_truth(node.right, group_row, schema))
     if isinstance(node, Not):
         return not _group_truth(node.operand, group_row, schema)
     if isinstance(node, Compare):
@@ -697,7 +699,7 @@ def _sorted_rows(rows, valuefn, descending: bool):
     vals = [valuefn(r) for r in rows]
     numeric = all(_as_float(v) is not None for v in vals)
     keyf = (lambda pair: _as_float(pair[1])) if numeric else (lambda pair: str(pair[1]))
-    ordered = sorted(zip(rows, vals), key=keyf, reverse=descending)
+    ordered = sorted(zip(rows, vals, strict=True), key=keyf, reverse=descending)
     return [r for r, _ in ordered]
 
 

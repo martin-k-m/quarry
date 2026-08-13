@@ -184,15 +184,25 @@ def test_inner_join_matches_on_key(joined):
 def test_join_star_exposes_both_sides_qualified(joined):
     sql = "SELECT * FROM people JOIN orders ON people.id = orders.person"
     cols, _ = run(sql, joined)
-    assert cols == ["people.id", "people.name", "people.city",
-                    "orders.id", "orders.person", "orders.amount"]
+    assert cols == [
+        "people.id",
+        "people.name",
+        "people.city",
+        "orders.id",
+        "orders.person",
+        "orders.amount",
+    ]
 
 
 def test_join_bare_unambiguous_column_resolves(joined):
     # name is only on people, amount only on orders, so bare names resolve.
     sql = "SELECT name, amount FROM people JOIN orders ON people.id = orders.person"
     _, rows = run(sql, joined)
-    assert {(r["name"], r["amount"]) for r in rows} == {("ada", "50"), ("ada", "20"), ("alan", "99")}
+    assert {(r["name"], r["amount"]) for r in rows} == {
+        ("ada", "50"),
+        ("ada", "20"),
+        ("alan", "99"),
+    }
 
 
 def test_join_bare_ambiguous_column_is_a_query_error(joined):
@@ -203,17 +213,24 @@ def test_join_bare_ambiguous_column_is_a_query_error(joined):
 
 
 def test_join_with_where_and_order_by(joined):
-    sql = ("SELECT people.name, orders.amount FROM people JOIN orders "
-           "ON people.id = orders.person WHERE orders.amount > 10 "
-           "ORDER BY orders.amount DESC")
+    sql = (
+        "SELECT people.name, orders.amount FROM people JOIN orders "
+        "ON people.id = orders.person WHERE orders.amount > 10 "
+        "ORDER BY orders.amount DESC"
+    )
     _, rows = run(sql, joined)
     assert [(r["people.name"], r["orders.amount"]) for r in rows] == [
-        ("alan", "99"), ("ada", "50"), ("ada", "20")]
+        ("alan", "99"),
+        ("ada", "50"),
+        ("ada", "20"),
+    ]
 
 
 def test_join_aggregate_group_by(joined):
-    sql = ("SELECT people.name, SUM(orders.amount) FROM people JOIN orders "
-           "ON people.id = orders.person GROUP BY people.name")
+    sql = (
+        "SELECT people.name, SUM(orders.amount) FROM people JOIN orders "
+        "ON people.id = orders.person GROUP BY people.name"
+    )
     _, rows = run(sql, joined)
     got = {r["people.name"]: r["sum(orders.amount)"] for r in rows}
     assert got == {"ada": "70", "alan": "99"}
@@ -310,7 +327,8 @@ def test_arithmetic_in_having(tmp_path):
 
 # ── LEFT JOIN ────────────────────────────────────────────────────────────────
 def test_left_join_keeps_unmatched_left_rows_with_empty_right(joined):
-    sql = "SELECT people.name, orders.amount FROM people LEFT JOIN orders ON people.id = orders.person"
+    sql = ("SELECT people.name, orders.amount FROM people "
+           "LEFT JOIN orders ON people.id = orders.person")
     _, rows = run(sql, joined)
     pairs = {(r["people.name"], r["orders.amount"]) for r in rows}
     # ada has two orders, alan one, grace none (empty amount); order 13 drops out.
@@ -318,7 +336,8 @@ def test_left_join_keeps_unmatched_left_rows_with_empty_right(joined):
 
 
 def test_left_join_matched_rows_are_correct(joined):
-    sql = "SELECT people.name, orders.amount FROM people LEFT JOIN orders ON people.id = orders.person"
+    sql = ("SELECT people.name, orders.amount FROM people "
+           "LEFT JOIN orders ON people.id = orders.person")
     _, rows = run(sql, joined)
     ada = sorted(r["orders.amount"] for r in rows if r["people.name"] == "ada")
     assert ada == ["20", "50"]
@@ -332,16 +351,20 @@ def test_left_join_outer_keyword_is_accepted(joined):
 
 def test_left_join_with_where_on_left_column(joined):
     # A WHERE on a left column keeps the unmatched row when it qualifies.
-    sql = ("SELECT people.name, orders.amount FROM people LEFT JOIN orders "
-           "ON people.id = orders.person WHERE people.city = 'new york'")
+    sql = (
+        "SELECT people.name, orders.amount FROM people LEFT JOIN orders "
+        "ON people.id = orders.person WHERE people.city = 'new york'"
+    )
     _, rows = run(sql, joined)
     assert rows == [{"people.name": "grace", "orders.amount": ""}]
 
 
 def test_left_join_aggregation_counts_matches_only(joined):
     # COUNT(orders.amount) ignores the empty right side, so grace counts zero.
-    sql = ("SELECT people.name, COUNT(orders.amount) FROM people LEFT JOIN orders "
-           "ON people.id = orders.person GROUP BY people.name")
+    sql = (
+        "SELECT people.name, COUNT(orders.amount) FROM people LEFT JOIN orders "
+        "ON people.id = orders.person GROUP BY people.name"
+    )
     _, rows = run(sql, joined)
     got = {r["people.name"]: r["count(orders.amount)"] for r in rows}
     assert got == {"ada": "2", "alan": "1", "grace": "0"}
@@ -349,7 +372,9 @@ def test_left_join_aggregation_counts_matches_only(joined):
 
 # ── Scalar functions ─────────────────────────────────────────────────────────
 def test_upper_and_lower(data):
-    rows = rows_of("SELECT UPPER(name) AS u, LOWER(city) AS l FROM people ORDER BY name ASC LIMIT 1", data)
+    rows = rows_of(
+        "SELECT UPPER(name) AS u, LOWER(city) AS l FROM people ORDER BY name ASC LIMIT 1", data
+    )
     assert rows[0] == {"u": "ADA", "l": "london"}
 
 
@@ -419,7 +444,9 @@ def test_function_composed_with_arithmetic(data):
 
 
 def test_function_in_where(data):
-    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE UPPER(city) = 'LONDON'", data)}
+    names = {
+        r["name"] for r in rows_of("SELECT name FROM people WHERE UPPER(city) = 'LONDON'", data)
+    }
     assert names == {"ada", "alan"}
 
 
@@ -431,7 +458,10 @@ def test_function_in_order_by(data):
 
 # ── IN and NOT IN ────────────────────────────────────────────────────────────
 def test_in_string_list(data):
-    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE city IN ('london', 'austin')", data)}
+    names = {
+        r["name"]
+        for r in rows_of("SELECT name FROM people WHERE city IN ('london', 'austin')", data)
+    }
     assert names == {"ada", "alan", "edsger"}
 
 
@@ -517,23 +547,31 @@ def test_like_in_having(tmp_path):
 
 # ── BETWEEN and NOT BETWEEN ──────────────────────────────────────────────────
 def test_between_numeric_inclusive(data):
-    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE age BETWEEN 36 AND 42", data)}
+    names = {
+        r["name"] for r in rows_of("SELECT name FROM people WHERE age BETWEEN 36 AND 42", data)
+    }
     assert names == {"ada", "grace", "alan"}  # 36, 42, 41; 54 excluded
 
 
 def test_between_excludes_out_of_range(data):
-    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE age BETWEEN 40 AND 50", data)}
+    names = {
+        r["name"] for r in rows_of("SELECT name FROM people WHERE age BETWEEN 40 AND 50", data)
+    }
     assert names == {"grace", "alan"}  # 42, 41
 
 
 def test_between_lexical(data):
     # String bounds compare lexically: names from 'a' up to 'b'.
-    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE name BETWEEN 'a' AND 'b'", data)}
+    names = {
+        r["name"] for r in rows_of("SELECT name FROM people WHERE name BETWEEN 'a' AND 'b'", data)
+    }
     assert names == {"ada", "alan"}
 
 
 def test_not_between(data):
-    names = {r["name"] for r in rows_of("SELECT name FROM people WHERE age NOT BETWEEN 36 AND 42", data)}
+    names = {
+        r["name"] for r in rows_of("SELECT name FROM people WHERE age NOT BETWEEN 36 AND 42", data)
+    }
     assert names == {"edsger"}  # only 54 is outside
 
 
@@ -553,7 +591,6 @@ def test_between_in_having(tmp_path):
 
 # ── REPL ─────────────────────────────────────────────────────────────────────
 def _run_repl(monkeypatch, capsys, script, cwd):
-    import os
 
     from quarry.__main__ import main
 
@@ -565,7 +602,9 @@ def _run_repl(monkeypatch, capsys, script, cwd):
 
 
 def test_repl_runs_a_query_and_exits(data, monkeypatch, capsys):
-    code, out = _run_repl(monkeypatch, capsys, "SELECT name FROM people WHERE age > 50\n.exit\n", data)
+    code, out = _run_repl(
+        monkeypatch, capsys, "SELECT name FROM people WHERE age > 50\n.exit\n", data
+    )
     assert code == 0
     assert "edsger" in out
     assert "(1 row)" in out
@@ -580,8 +619,8 @@ def test_repl_bad_query_does_not_stop_session(data, monkeypatch, capsys):
     script = "SELECT nope FROM people\nSELECT name FROM people WHERE age > 50\n.exit\n"
     code, out = _run_repl(monkeypatch, capsys, script, data)
     assert code == 0
-    assert "error:" in out          # the bad query reported an error
-    assert "edsger" in out          # and the next query still ran
+    assert "error:" in out  # the bad query reported an error
+    assert "edsger" in out  # and the next query still ran
 
 
 def test_repl_blank_lines_are_ignored(data, monkeypatch, capsys):

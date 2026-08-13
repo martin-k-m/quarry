@@ -14,7 +14,7 @@ def _format(cols: list[str], rows: list[dict[str, str]]) -> str:
             widths[c] = max(widths[c], len(str(r[c])))
 
     def line(values) -> str:
-        return "  ".join(str(v).ljust(widths[c]) for c, v in zip(cols, values))
+        return "  ".join(str(v).ljust(widths[c]) for c, v in zip(cols, values, strict=True))
 
     out = [line(cols), line(["-" * widths[c] for c in cols])]
     out += [line([r[c] for c in cols]) for r in rows]
