@@ -19,6 +19,7 @@ Hypothesis search for a counterexample:
 from __future__ import annotations
 
 import csv
+import math
 
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
@@ -104,18 +105,29 @@ _expr = st.one_of(
 )
 
 
+# An item may be renamed with AS. The alias pool deliberately includes the
+# column names themselves, so `age AS age` and a swapped `name AS age` are both
+# reachable: an alias that shadows an input column is the case that used to send
+# ORDER BY into unbounded recursion.
+_alias_name = st.sampled_from([*COLUMNS, "x", "v"])
+_aliased_item = st.builds(lambda e, a: f"{e} AS {a}", st.one_of(_col, _expr), _alias_name)
+
+
 @st.composite
 def queries(draw):
     """A SELECT with a random mix of projection, WHERE, ORDER BY, and LIMIT."""
     proj = draw(st.one_of(
         st.just("*"),
-        st.lists(st.one_of(_col, _expr), min_size=1, max_size=3).map(", ".join),
+        st.lists(st.one_of(_col, _expr, _aliased_item), min_size=1, max_size=3).map(", ".join),
     ))
+    if proj != "*" and draw(st.booleans()):
+        proj = "DISTINCT " + proj
     sql = f"SELECT {proj} FROM people"
     if draw(st.booleans()):
         sql += " WHERE " + draw(_predicate())
     if draw(st.booleans()):
-        sql += f" ORDER BY {draw(_col)}" + draw(st.sampled_from(["", " ASC", " DESC"]))
+        target = draw(st.one_of(_col, _alias_name))
+        sql += f" ORDER BY {target}" + draw(st.sampled_from(["", " ASC", " DESC"]))
     if draw(st.booleans()):
         sql += f" LIMIT {draw(st.integers(0, 50))}"
     return sql
@@ -382,3 +394,182 @@ def test_nesting_within_the_limit_still_parses(tmp_path, shape):
     except QueryError:
         pass  # a semantic complaint is fine; a depth ParseError would not be
 
+
+# ── ORDER BY over an output alias ────────────────────────────────────────────
+# Regression tests for a real bug this file found: `_order_value` resolved an
+# ORDER BY name against the SELECT list's aliases and then resolved the result
+# again, so an alias that shadows an input column never bottomed out.
+# `SELECT age AS age FROM people ORDER BY age` recursed until the interpreter
+# stack ran out and escaped as a bare RecursionError. An alias now resolves
+# exactly once, to the input column it renamed.
+
+
+@NO_FIXTURE
+@given(rows=people_rows, col=st.sampled_from(COLUMNS), alias=_alias_name)
+def test_order_by_alias_matches_ordering_by_the_column_it_renamed(tmp_path, rows, col, alias):
+    # Renaming a column cannot change how ORDER BY over it behaves, including
+    # when the new name is one of the table's own column names.
+    write_people(tmp_path, rows)
+    _, aliased = run(f"SELECT {col} AS {alias} FROM people ORDER BY {alias}", str(tmp_path))
+    _, plain = run(f"SELECT {col} FROM people ORDER BY {col}", str(tmp_path))
+    assert [r[alias] for r in aliased] == [r[col] for r in plain]
+
+
+@NO_FIXTURE
+@given(rows=people_rows, a=st.sampled_from(COLUMNS), b=st.sampled_from(COLUMNS))
+def test_swapped_aliases_order_by_the_input_column(tmp_path, rows, a, b):
+    # `SELECT a AS b, b AS a ... ORDER BY a` is the mutually-shadowing case. An
+    # alias names an output, but what it renamed is written in terms of the
+    # input, so ORDER BY a must sort by the input column that `a` renamed here,
+    # which is `b`. Resolving through the alias table twice would not terminate.
+    write_people(tmp_path, rows)
+    _, out = run(f"SELECT {a} AS {b}, {b} AS {a} FROM people ORDER BY {a}", str(tmp_path))
+    _, want = run(f"SELECT {b} FROM people ORDER BY {b}", str(tmp_path))
+    assert [r[a] for r in out] == [r[b] for r in want]
+
+
+# ── a reference implementation for WHERE ─────────────────────────────────────
+# The metamorphic properties above relate one engine result to another, so a
+# consistently wrong filter satisfies them all. This checks the engine against
+# an independent oracle: a predicate is generated once and rendered two ways, as
+# SQL text and as a plain-Python function over the same row dicts. `age` is
+# always a clean integer in the generated data, so the oracle is exact and there
+# is no three-valued-logic gap to argue about.
+
+_OPS = {
+    "=": lambda a, b: a == b,
+    "!=": lambda a, b: a != b,
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+}
+
+
+def _ref_compare(op, k):
+    return (f"age {op} {k}", lambda r: _OPS[op](int(r["age"]), k))
+
+
+def _ref_between(lo, hi):
+    return (f"age BETWEEN {lo} AND {hi}", lambda r: lo <= int(r["age"]) <= hi)
+
+
+def _ref_in(ks):
+    return (f"age IN ({', '.join(str(k) for k in ks)})", lambda r: int(r["age"]) in set(ks))
+
+
+def _ref_city(c):
+    return (f"city = '{c}'", lambda r: r["city"] == c)
+
+
+_ints = st.integers(min_value=-5, max_value=99)
+
+_ref_atom = st.one_of(
+    st.builds(_ref_compare, st.sampled_from(list(_OPS)), _ints),
+    st.builds(_ref_between, _ints, _ints),
+    st.builds(_ref_in, st.lists(_ints, min_size=1, max_size=4)),
+    st.builds(_ref_city, st.sampled_from(CITIES)),
+)
+
+_ref_predicate = st.recursive(
+    _ref_atom,
+    lambda inner: st.one_of(
+        st.builds(lambda x, y: (f"({x[0]}) AND ({y[0]})", lambda r: x[1](r) and y[1](r)),
+                  inner, inner),
+        st.builds(lambda x, y: (f"({x[0]}) OR ({y[0]})", lambda r: x[1](r) or y[1](r)),
+                  inner, inner),
+        st.builds(lambda x: (f"NOT ({x[0]})", lambda r: not x[1](r)), inner),
+    ),
+    max_leaves=5,
+)
+
+
+@NO_FIXTURE
+@given(rows=people_rows, pred=_ref_predicate)
+def test_where_agrees_with_a_reference_implementation(tmp_path, rows, pred):
+    sql_text, matches = pred
+    write_people(tmp_path, rows)
+    _, out = run(f"SELECT name, age FROM people WHERE {sql_text}", str(tmp_path))
+    want = [r for r in rows if matches(r)]
+    # Equal as sequences, not sets: filtering keeps the input order too.
+    assert [(r["name"], r["age"]) for r in out] == [(r["name"], r["age"]) for r in want]
+
+
+# ── the default name of a computed column is a usable expression ─────────────
+# Regression tests for a real bug this file found: `render_expr` decided whether
+# a child needed parentheses from the *child's* operator instead of the parent's,
+# so `a - (b + c)` was named `a - b + c` and `a / (b * c)` was named `a / b * c`.
+# Both names denote a different computation from the one they label. The property
+# below states the contract the renderer owes: you can paste a computed column's
+# header back into a query and get that same column.
+
+_num_expr = st.recursive(
+    st.one_of(st.just("age"), st.integers(1, 9).map(str)),
+    lambda inner: st.one_of(
+        st.builds(lambda a, b: f"({a} + {b})", inner, inner),
+        st.builds(lambda a, b: f"({a} - {b})", inner, inner),
+        st.builds(lambda a, b: f"({a} * {b})", inner, inner),
+        st.builds(lambda a, b: f"({a} / {b})", inner, inner),
+        st.builds(lambda a: f"(-{a})", inner),
+    ),
+    max_leaves=6,
+)
+
+
+@NO_FIXTURE
+@given(rows=people_rows, expr=_num_expr)
+def test_computed_column_name_recomputes_the_same_column(tmp_path, rows, expr):
+    write_people(tmp_path, rows)
+    try:
+        cols, out = run(f"SELECT {expr} FROM people", str(tmp_path))
+    except QueryError:
+        return  # division by zero: nothing to name, and nothing to compare
+    name = cols[0]
+    # The rendered name must parse and run. A name that no longer denotes the
+    # column it labels shows up here as either an error or different values.
+    cols2, out2 = run(f"SELECT {name} FROM people", str(tmp_path))
+    assert cols2 == cols
+    for a, b in zip(out, out2, strict=True):
+        x, y = float(a[name]), float(b[name])
+        # Re-associating + and * is allowed and can move the last bit; changing
+        # the shape of the expression, which is what the bug did, cannot.
+        assert math.isclose(x, y, rel_tol=1e-9, abs_tol=1e-9)
+
+
+# ── ragged CSV rows ──────────────────────────────────────────────────────────
+# Regression tests for a real bug this file found: csv.DictReader leaves a short
+# row's missing fields as None, and those None values flowed straight through to
+# the result, breaking the documented (list[str], list[dict[str, str]]) contract
+# and making COUNT(col) count a field that was never there. A missing value now
+# reads as the empty string, exactly like a written-but-blank one.
+
+@NO_FIXTURE
+@given(
+    lines=st.lists(
+        # min_size=1: a zero-field row is a blank line, which the csv module
+        # skips by design, so it is not a ragged row the engine ever sees.
+        st.lists(st.sampled_from(["ada", "7", "", "london"]), min_size=1, max_size=5),
+        min_size=1,
+        max_size=10,
+    )
+)
+def test_ragged_rows_yield_only_strings_and_an_honest_count(tmp_path, lines):
+    # Rows with too few or too many fields for the header, written raw so the
+    # ragged shape survives to the reader.
+    path = tmp_path / "people.csv"
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(COLUMNS)
+        w.writerows(lines)
+
+    _, star = run("SELECT * FROM people", str(tmp_path))
+    assert len(star) == len(lines)
+    for r in star:
+        assert set(r) == set(COLUMNS)
+        assert all(isinstance(v, str) for v in r.values())
+
+    # COUNT(col) skips a blank value, and a field a short row never had is blank.
+    for i, col in enumerate(COLUMNS):
+        present = sum(1 for line in lines if i < len(line) and line[i] != "")
+        _, out = run(f"SELECT COUNT({col}) AS c FROM people", str(tmp_path))
+        assert int(out[0]["c"]) == present

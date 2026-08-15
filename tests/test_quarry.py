@@ -2,7 +2,7 @@ import io
 
 import pytest
 
-from quarry import ParseError, QueryError, run
+from quarry import LexError, ParseError, QueryError, run
 
 CSV = """\
 name,age,city
@@ -642,3 +642,307 @@ def test_quoted_string_with_embedded_quote(tmp_path):
     (tmp_path / "q.csv").write_text("label\no'brien\nsmith\n", encoding="utf-8")
     rows = rows_of("SELECT label FROM q WHERE label = 'o''brien'", str(tmp_path))
     assert [r["label"] for r in rows] == ["o'brien"]
+
+
+# ── JOIN ON with unqualified column names ────────────────────────────────────
+# The ON clause accepts bare names and works out which side each belongs to.
+# Every branch of that resolution is reachable from a query, so pin them all.
+
+def test_join_on_bare_name_present_on_both_sides_is_ambiguous(joined):
+    # `id` is a column of both tables, so a bare `id` in ON has no single meaning.
+    with pytest.raises(QueryError, match="ambiguous in JOIN ON"):
+        run("SELECT people.name FROM people JOIN orders ON id = person", joined)
+
+
+def test_join_on_bare_names_unique_to_one_side_resolve(tmp_path):
+    (tmp_path / "people.csv").write_text("pid,name\n1,ada\n2,grace\n", encoding="utf-8")
+    (tmp_path / "orders.csv").write_text("oid,pid_ref\n10,1\n11,1\n", encoding="utf-8")
+    sql = "SELECT people.name, orders.oid FROM people JOIN orders ON pid = pid_ref"
+    _, rows = run(sql, str(tmp_path))
+    assert [(r["people.name"], r["orders.oid"]) for r in rows] == [("ada", "10"), ("ada", "11")]
+
+
+def test_join_on_bare_names_resolve_in_either_order(tmp_path):
+    # The right table's column written first still resolves to the right side.
+    (tmp_path / "people.csv").write_text("pid,name\n1,ada\n", encoding="utf-8")
+    (tmp_path / "orders.csv").write_text("oid,pid_ref\n10,1\n", encoding="utf-8")
+    sql = "SELECT people.name, orders.oid FROM people JOIN orders ON pid_ref = pid"
+    _, rows = run(sql, str(tmp_path))
+    assert rows == [{"people.name": "ada", "orders.oid": "10"}]
+
+
+def test_join_on_unknown_bare_column(joined):
+    with pytest.raises(QueryError, match="unknown column 'nope' in JOIN ON"):
+        run("SELECT name FROM people JOIN orders ON nope = person", joined)
+
+
+def test_join_on_unknown_qualified_column_on_the_left(joined):
+    with pytest.raises(QueryError, match="unknown column 'people.nope'"):
+        run("SELECT name FROM people JOIN orders ON people.nope = orders.person", joined)
+
+
+def test_join_on_unknown_qualified_column_on_the_right(joined):
+    with pytest.raises(QueryError, match="unknown column 'orders.nope'"):
+        run("SELECT name FROM people JOIN orders ON people.id = orders.nope", joined)
+
+
+def test_join_on_unknown_table_qualifier(joined):
+    with pytest.raises(QueryError, match="unknown table 'nope'"):
+        run("SELECT name FROM people JOIN orders ON nope.id = orders.person", joined)
+
+
+def test_join_on_both_columns_from_the_same_side(joined):
+    with pytest.raises(QueryError, match="a column from each table"):
+        run("SELECT name FROM people JOIN orders ON people.id = people.id", joined)
+
+
+def test_join_on_must_be_equality(joined):
+    with pytest.raises(ParseError, match="only equality"):
+        run("SELECT name FROM people JOIN orders ON people.id > orders.person", joined)
+
+
+def test_join_needs_two_differently_named_tables(joined):
+    with pytest.raises(QueryError, match="differently named"):
+        run("SELECT id FROM people JOIN people ON id = id", joined)
+
+
+# ── scalar function arity and argument errors ────────────────────────────────
+
+def test_unknown_function_is_a_query_error(data):
+    with pytest.raises(QueryError, match="unknown function NOPE"):
+        run("SELECT NOPE(name) FROM people", data)
+
+
+@pytest.mark.parametrize("fn", ["UPPER", "LOWER", "LENGTH"])
+def test_text_functions_take_exactly_one_argument(data, fn):
+    with pytest.raises(QueryError, match="takes one argument, got 2"):
+        run(f"SELECT {fn}(name, city) FROM people", data)
+
+
+def test_abs_takes_exactly_one_argument(data):
+    with pytest.raises(QueryError, match="ABS takes one argument, got 2"):
+        run("SELECT ABS(age, age) FROM people", data)
+
+
+def test_round_takes_one_or_two_arguments(data):
+    with pytest.raises(QueryError, match="ROUND takes one or two arguments, got 3"):
+        run("SELECT ROUND(age, 1, 1) FROM people", data)
+
+
+def test_round_digit_count_must_be_whole(data):
+    with pytest.raises(QueryError, match="digit count must be a whole number"):
+        run("SELECT ROUND(age, 1.5) FROM people", data)
+
+
+def test_lower_lowercases(data):
+    _, rows = run("SELECT LOWER(city) AS c FROM people WHERE name = 'grace'", data)
+    assert rows == [{"c": "new york"}]
+
+
+def test_coalesce_returns_empty_when_every_argument_is_blank(tmp_path):
+    (tmp_path / "t.csv").write_text("a,b\n,\n", encoding="utf-8")
+    _, rows = run("SELECT COALESCE(a, b) AS c FROM t", str(tmp_path))
+    assert rows == [{"c": ""}]
+
+
+def test_string_literal_in_a_computed_column_name_keeps_its_quotes(data):
+    cols, _ = run("SELECT COALESCE(name, 'n/a') FROM people", data)
+    assert cols == ["COALESCE(name, 'n/a')"]
+
+
+# ── HAVING beyond a single comparison ────────────────────────────────────────
+
+def test_having_combines_conditions_with_and(data):
+    sql = ("SELECT city, COUNT(*) AS c FROM people GROUP BY city "
+           "HAVING COUNT(*) > 1 AND SUM(age) > 70")
+    assert {r["city"] for r in rows_of(sql, data)} == {"london"}
+
+
+def test_having_combines_conditions_with_or(data):
+    sql = ("SELECT city, COUNT(*) AS c FROM people GROUP BY city "
+           "HAVING COUNT(*) > 1 OR SUM(age) > 50")
+    assert {r["city"] for r in rows_of(sql, data)} == {"london", "austin"}
+
+
+def test_having_with_not(data):
+    sql = ("SELECT city, COUNT(*) AS c FROM people GROUP BY city "
+           "HAVING NOT (COUNT(*) > 1)")
+    assert {r["city"] for r in rows_of(sql, data)} == {"new york", "austin"}
+
+
+def test_having_over_a_function_of_an_aggregate(data):
+    sql = ("SELECT city, AVG(age) AS a FROM people GROUP BY city "
+           "HAVING ROUND(AVG(age), 0) > 45")
+    assert {r["city"] for r in rows_of(sql, data)} == {"austin"}
+
+
+def test_having_on_a_bare_aggregate_is_truthy_when_non_zero(data):
+    # An aggregate in boolean position, with no comparison around it: a group
+    # survives when its value is neither zero nor blank.
+    sql = "SELECT city, COUNT(*) AS c FROM people GROUP BY city HAVING COUNT(*)"
+    assert len(rows_of(sql, data)) == 3
+
+
+def test_having_may_not_reference_a_non_group_column(data):
+    with pytest.raises(QueryError, match="only reference group columns or aggregates"):
+        run("SELECT city FROM people GROUP BY city HAVING age > 1", data)
+
+
+def test_having_over_arithmetic_on_a_group_column(tmp_path):
+    (tmp_path / "t.csv").write_text("g,v\n1,a\n2,b\n3,c\n", encoding="utf-8")
+    sql = "SELECT g, COUNT(*) AS c FROM t GROUP BY g HAVING -g < -1"
+    assert [r["g"] for r in rows_of(sql, str(tmp_path))] == ["2", "3"]
+
+
+def test_computed_column_over_aggregates(data):
+    sql = "SELECT city, SUM(age) / COUNT(*) AS mean FROM people GROUP BY city"
+    got = {r["city"]: r["mean"] for r in rows_of(sql, data)}
+    assert got["austin"] == "54"
+    assert got["london"] == "38.5"
+
+
+def test_aggregate_in_a_computed_column_name(data):
+    cols, _ = run("SELECT COUNT(*) + 1 FROM people", data)
+    assert cols == ["count + 1"]
+
+
+# ── aggregate edge cases ─────────────────────────────────────────────────────
+
+def test_select_star_cannot_be_combined_with_aggregation(data):
+    with pytest.raises(QueryError, match=r"SELECT \* cannot be combined"):
+        run("SELECT * FROM people GROUP BY city", data)
+
+
+def test_aggregate_over_an_empty_relation_yields_one_row(data):
+    _, rows = run("SELECT COUNT(*) AS c, SUM(age) AS s FROM people WHERE age > 999", data)
+    assert rows == [{"c": "0", "s": "0"}]
+
+
+def test_min_max_avg_over_only_blank_values_are_blank(tmp_path):
+    (tmp_path / "t.csv").write_text("a\n\n\n", encoding="utf-8")
+    _, rows = run("SELECT MIN(a) AS m, MAX(a) AS x, AVG(a) AS v FROM t", str(tmp_path))
+    assert rows == [{"m": "", "x": "", "v": ""}]
+
+
+def test_aggregate_order_by_must_be_a_selected_output(data):
+    with pytest.raises(QueryError, match="not a selected output column"):
+        run("SELECT city, COUNT(*) AS c FROM people GROUP BY city ORDER BY SUM(age)", data)
+
+
+# ── parser and lexer error paths ─────────────────────────────────────────────
+
+def test_limit_must_be_a_whole_number(data):
+    with pytest.raises(ParseError, match="LIMIT must be a whole number"):
+        run("SELECT name FROM people LIMIT 2.5", data)
+
+
+def test_from_needs_a_table_name(data):
+    with pytest.raises(ParseError, match="expected a table name after FROM"):
+        run("SELECT name FROM 5", data)
+
+
+def test_stray_bang_is_a_lex_error(data):
+    with pytest.raises(LexError, match="stray '!'"):
+        run("SELECT name FROM people WHERE name ! 'ada'", data)
+
+
+# ── a predicate used where a value is expected ───────────────────────────────
+
+def test_boolean_expression_in_the_select_list(data):
+    # `(age > 40)` in a value position evaluates to a boolean, which the
+    # projection formats as a number, so it prints as 0 or 1 rather than as
+    # Python's False and True.
+    _, rows = run("SELECT name, (age > 40) AS old FROM people", data)
+    got = {r["name"]: r["old"] for r in rows}
+    assert got["ada"] == "0"
+    assert got["grace"] == "1"
+
+
+def test_bare_text_column_in_where_is_truthy_when_non_empty(tmp_path):
+    (tmp_path / "t.csv").write_text("a,b\nx,1\n,2\ny,3\n", encoding="utf-8")
+    assert [r["b"] for r in rows_of("SELECT b FROM t WHERE a", str(tmp_path))] == ["1", "3"]
+
+
+def test_bare_numeric_column_in_where_is_truthy_when_non_zero(tmp_path):
+    (tmp_path / "t.csv").write_text("a,b\n0,1\n5,2\n0.0,3\n", encoding="utf-8")
+    assert [r["b"] for r in rows_of("SELECT b FROM t WHERE a", str(tmp_path))] == ["2"]
+
+
+# ── one-shot command line ────────────────────────────────────────────────────
+# The REPL is covered above; this is the other entry point, the one the
+# `quarry` console script installs.
+
+def test_cli_runs_one_query_and_returns_zero(data, monkeypatch, capsys):
+    from quarry.__main__ import main
+    monkeypatch.chdir(data)
+    assert main(["SELECT name FROM people WHERE age > 50"]) == 0
+    out = capsys.readouterr().out
+    assert "edsger" in out
+    assert "(1 row)" in out
+
+
+def test_cli_reports_a_bad_query_on_stderr_and_returns_one(data, monkeypatch, capsys):
+    from quarry.__main__ import main
+    monkeypatch.chdir(data)
+    assert main(["SELECT nope FROM people"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error: unknown column 'nope'" in captured.err
+
+
+def test_cli_with_no_arguments_starts_the_repl(data, monkeypatch, capsys):
+    from quarry import __main__ as m
+    monkeypatch.chdir(data)
+    monkeypatch.setattr("sys.stdin", io.StringIO(".exit\n"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: ".exit")
+    assert m.main([]) == 0
+    assert "quarry." in capsys.readouterr().out
+
+
+# ── remaining error and formatting paths ─────────────────────────────────────
+
+def test_qualified_reference_to_an_unknown_column_on_a_known_table(data):
+    with pytest.raises(QueryError, match="unknown column 'people.nope'"):
+        run("SELECT people.nope FROM people", data)
+
+
+def test_unterminated_string_is_a_lex_error(data):
+    with pytest.raises(LexError, match="unterminated string"):
+        run("SELECT name FROM people WHERE city = 'london", data)
+
+
+def test_predicate_as_a_select_item_is_named_from_its_node(data):
+    # A comparison is not part of the arithmetic renderer's grammar, so its
+    # default output name falls back to the node's own text form.
+    cols, _ = run("SELECT (age > 40) FROM people", data)
+    assert len(cols) == 1
+    assert "Compare" in cols[0]
+
+
+def test_predicate_over_aggregates_in_the_select_list(data):
+    # A comparison in a value position inside an aggregate query is evaluated
+    # against the grouped row, not a raw one.
+    sql = "SELECT city, (COUNT(*) > 1) AS many FROM people GROUP BY city"
+    got = {r["city"]: r["many"] for r in rows_of(sql, data)}
+    assert got == {"london": "1", "new york": "0", "austin": "0"}
+
+
+def test_order_by_an_alias_over_a_computed_expression(data):
+    # The alias names an arithmetic expression rather than a plain column, so
+    # ORDER BY has to evaluate it per row instead of reading a stored value.
+    sql = "SELECT name, 100 - age AS remaining FROM people ORDER BY remaining"
+    assert [r["name"] for r in rows_of(sql, data)] == ["edsger", "grace", "alan", "ada"]
+
+
+def test_order_by_an_alias_that_shadows_a_different_column(data):
+    # `age AS name` makes the output column `name` while the input column
+    # `name` still exists. ORDER BY name sorts by what the alias renamed, age.
+    sql = "SELECT age AS name FROM people ORDER BY name"
+    assert [r["name"] for r in rows_of(sql, data)] == ["36", "41", "42", "54"]
+
+
+def test_order_by_an_alias_equal_to_the_column_it_renames(data):
+    # The self-referential case. This used to recurse until the interpreter
+    # stack ran out and escaped as a bare RecursionError.
+    sql = "SELECT age AS age FROM people ORDER BY age DESC"
+    assert [r["age"] for r in rows_of(sql, data)] == ["54", "42", "41", "36"]

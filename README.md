@@ -7,8 +7,11 @@
 
 A small SQL query engine over CSV files, in Python.
 
-quarry reads a CSV file and runs a subset of SQL over it: `SELECT`, `WHERE`,
-`ORDER BY`, `LIMIT`. It uses the standard library only. It exists as a readable
+quarry reads one or two CSV files and runs a subset of SQL over them: `SELECT`
+(with `DISTINCT` and `AS` aliases), `WHERE`, a two-table `INNER` or `LEFT JOIN`,
+`GROUP BY` with `HAVING`, `ORDER BY` and `LIMIT`, over an expression language
+with arithmetic, six scalar functions, and `IN`, `LIKE` and `BETWEEN`. The full
+list is below. It uses the standard library only. It exists as a readable
 version of the two halves of a query engine, a parser and an executor, with
 nothing hidden behind a framework.
 
@@ -86,7 +89,10 @@ lines are ignored. Quit with `.exit` or Ctrl-D. Line editing comes from
 - Comparisons that are numeric when both sides look like numbers and lexical
   otherwise, so `age > 30` and `name = 'ada'` both do the expected thing with no
   schema to declare
-- `ORDER BY` a column or an aggregate output column, ascending or descending
+- `ORDER BY` ascending or descending, over a column, an aggregate output column,
+  an `AS` alias, or, on a row query, an arithmetic expression. An alias resolves
+  to the input column or expression it renamed, so an alias that reuses one of
+  the table's own column names is still unambiguous.
 - `LIMIT`
 - Aggregates `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `AVG(col)`, `MIN(col)`,
   `MAX(col)`, with `GROUP BY` over one or more columns and an optional `HAVING`
@@ -95,6 +101,15 @@ lines are ignored. Quit with `.exit` or Ctrl-D. Line editing comes from
   are numeric and skip non-numeric values. `MIN`/`MAX` are numeric when the
   column is all numbers, lexical otherwise. A plain column in the SELECT list
   of an aggregate query must also appear in `GROUP BY`.
+- Ragged CSV rows. A row with fewer fields than the header reads its missing
+  fields as the empty string, the same value a written-but-blank field has, and
+  a row with more fields than the header ignores the surplus. Every value a
+  query returns is a string.
+- A bound on expression nesting. An expression may nest at most 100 levels deep,
+  counting parentheses, chained operators, stacked `NOT`s, unary minus and
+  nested function calls. Past that the parser reports a `ParseError` rather than
+  exhausting the interpreter stack, so a pathological query fails the same way
+  any other bad query does. Ordinary queries nest a handful of levels.
 
 Aggregate output columns are named predictably: `COUNT(*)` is `count`, and every
 other aggregate is `func(col)` lowercased, so `SUM(age)` is `sum(age)` and
@@ -126,7 +141,7 @@ uv run --with pytest python -m pytest
 ## Not done yet
 
 - Arithmetic is numeric only. There is no string concatenation. The scalar
-  function set is fixed at the seven listed above; there is no way to register
+  function set is fixed at the six listed above; there is no way to register
   more, and no user-defined functions.
 - `IN` takes a literal list only, not a subquery. There is no `IN (SELECT ...)`.
 - `LIKE` is case-sensitive, with no `ILIKE` and no `ESCAPE` clause to pick a
