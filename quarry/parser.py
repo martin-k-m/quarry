@@ -169,11 +169,10 @@ def _render_child(child, parent_op: str, is_right: bool) -> str:
     if isinstance(child, BinOp):
         parent_prec = _PREC[parent_op]
         cp = _PREC[child.op]
-        # Parenthesise a child that binds looser than its parent, or any child of
-        # equal precedence sitting on the right of a left-associative operator
-        # that is not associative: a - (b - c) and a - (b + c) both need the
-        # parens, and so do a / (b * c) and a / (b / c). Whether they are needed
-        # is a property of the *parent* operator, not the child's.
+        # Parenthesise a child that binds looser than its parent, or one of
+        # equal precedence on the right of - or /, which do not associate:
+        # a - (b + c) and a / (b * c) both need the parens. Whether they are
+        # needed is a property of the parent operator, not the child's.
         if cp < parent_prec or (cp == parent_prec and is_right and parent_op in "-/"):
             return f"({text})"
     return text

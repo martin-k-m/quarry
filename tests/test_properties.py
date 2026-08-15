@@ -105,10 +105,8 @@ _expr = st.one_of(
 )
 
 
-# An item may be renamed with AS. The alias pool deliberately includes the
-# column names themselves, so `age AS age` and a swapped `name AS age` are both
-# reachable: an alias that shadows an input column is the case that used to send
-# ORDER BY into unbounded recursion.
+# The alias pool includes the column names themselves, so an alias that shadows
+# an input column is reachable. That is the case that used to recurse forever.
 _alias_name = st.sampled_from([*COLUMNS, "x", "v"])
 _aliased_item = st.builds(lambda e, a: f"{e} AS {a}", st.one_of(_col, _expr), _alias_name)
 
@@ -396,19 +394,15 @@ def test_nesting_within_the_limit_still_parses(tmp_path, shape):
 
 
 # ── ORDER BY over an output alias ────────────────────────────────────────────
-# Regression tests for a real bug this file found: `_order_value` resolved an
-# ORDER BY name against the SELECT list's aliases and then resolved the result
-# again, so an alias that shadows an input column never bottomed out.
-# `SELECT age AS age FROM people ORDER BY age` recursed until the interpreter
-# stack ran out and escaped as a bare RecursionError. An alias now resolves
-# exactly once, to the input column it renamed.
+# Regression tests for a bug this file found: an ORDER BY name was resolved
+# against the SELECT aliases and then resolved again, so a shadowing alias never
+# bottomed out. An alias now resolves once, to the input column it renamed.
 
 
 @NO_FIXTURE
 @given(rows=people_rows, col=st.sampled_from(COLUMNS), alias=_alias_name)
 def test_order_by_alias_matches_ordering_by_the_column_it_renamed(tmp_path, rows, col, alias):
-    # Renaming a column cannot change how ORDER BY over it behaves, including
-    # when the new name is one of the table's own column names.
+    # Including when the new name is one of the table's own column names.
     write_people(tmp_path, rows)
     _, aliased = run(f"SELECT {col} AS {alias} FROM people ORDER BY {alias}", str(tmp_path))
     _, plain = run(f"SELECT {col} FROM people ORDER BY {col}", str(tmp_path))
@@ -418,10 +412,7 @@ def test_order_by_alias_matches_ordering_by_the_column_it_renamed(tmp_path, rows
 @NO_FIXTURE
 @given(rows=people_rows, a=st.sampled_from(COLUMNS), b=st.sampled_from(COLUMNS))
 def test_swapped_aliases_order_by_the_input_column(tmp_path, rows, a, b):
-    # `SELECT a AS b, b AS a ... ORDER BY a` is the mutually-shadowing case. An
-    # alias names an output, but what it renamed is written in terms of the
-    # input, so ORDER BY a must sort by the input column that `a` renamed here,
-    # which is `b`. Resolving through the alias table twice would not terminate.
+    # The mutually-shadowing case: ORDER BY a sorts by what `a` renamed, so b.
     write_people(tmp_path, rows)
     _, out = run(f"SELECT {a} AS {b}, {b} AS {a} FROM people ORDER BY {a}", str(tmp_path))
     _, want = run(f"SELECT {b} FROM people ORDER BY {b}", str(tmp_path))
@@ -430,11 +421,9 @@ def test_swapped_aliases_order_by_the_input_column(tmp_path, rows, a, b):
 
 # ── a reference implementation for WHERE ─────────────────────────────────────
 # The metamorphic properties above relate one engine result to another, so a
-# consistently wrong filter satisfies them all. This checks the engine against
-# an independent oracle: a predicate is generated once and rendered two ways, as
-# SQL text and as a plain-Python function over the same row dicts. `age` is
-# always a clean integer in the generated data, so the oracle is exact and there
-# is no three-valued-logic gap to argue about.
+# consistently wrong filter satisfies them all. Each predicate here is generated
+# once and rendered twice, as SQL text and as a Python function, giving an
+# independent oracle. `age` is always a clean integer, so the oracle is exact.
 
 _OPS = {
     "=": lambda a, b: a == b,
@@ -496,12 +485,10 @@ def test_where_agrees_with_a_reference_implementation(tmp_path, rows, pred):
 
 
 # ── the default name of a computed column is a usable expression ─────────────
-# Regression tests for a real bug this file found: `render_expr` decided whether
-# a child needed parentheses from the *child's* operator instead of the parent's,
-# so `a - (b + c)` was named `a - b + c` and `a / (b * c)` was named `a / b * c`.
-# Both names denote a different computation from the one they label. The property
-# below states the contract the renderer owes: you can paste a computed column's
-# header back into a query and get that same column.
+# Regression tests for a bug this file found: `render_expr` took the parenthesis
+# decision from the child's operator instead of the parent's, so `a - (b + c)`
+# was named `a - b + c`. The contract: paste a computed column's header back
+# into a query and get that same column.
 
 _num_expr = st.recursive(
     st.one_of(st.just("age"), st.integers(1, 9).map(str)),
@@ -525,8 +512,6 @@ def test_computed_column_name_recomputes_the_same_column(tmp_path, rows, expr):
     except QueryError:
         return  # division by zero: nothing to name, and nothing to compare
     name = cols[0]
-    # The rendered name must parse and run. A name that no longer denotes the
-    # column it labels shows up here as either an error or different values.
     cols2, out2 = run(f"SELECT {name} FROM people", str(tmp_path))
     assert cols2 == cols
     for a, b in zip(out, out2, strict=True):
@@ -537,11 +522,10 @@ def test_computed_column_name_recomputes_the_same_column(tmp_path, rows, expr):
 
 
 # ── ragged CSV rows ──────────────────────────────────────────────────────────
-# Regression tests for a real bug this file found: csv.DictReader leaves a short
-# row's missing fields as None, and those None values flowed straight through to
-# the result, breaking the documented (list[str], list[dict[str, str]]) contract
-# and making COUNT(col) count a field that was never there. A missing value now
-# reads as the empty string, exactly like a written-but-blank one.
+# Regression tests for a bug this file found: DictReader's None for a short
+# row's missing field flowed into the result, breaking the documented
+# list[dict[str, str]] contract and making COUNT(col) count a field that was
+# never there. A missing value now reads as the empty string.
 
 @NO_FIXTURE
 @given(
@@ -554,8 +538,7 @@ def test_computed_column_name_recomputes_the_same_column(tmp_path, rows, expr):
     )
 )
 def test_ragged_rows_yield_only_strings_and_an_honest_count(tmp_path, lines):
-    # Rows with too few or too many fields for the header, written raw so the
-    # ragged shape survives to the reader.
+    # Written raw so the ragged shape survives to the reader.
     path = tmp_path / "people.csv"
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)

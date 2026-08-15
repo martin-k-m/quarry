@@ -137,12 +137,10 @@ def _load(token: str, base_dir: str) -> tuple[str, list[str], list[dict[str, str
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         fields = list(reader.fieldnames or [])
-        # A short row leaves DictReader's missing fields as None, and a long one
-        # parks the surplus under a None key. Normalise both away here: every row
-        # carries exactly the header's fields, and a missing value reads as the
-        # empty string, the same as a written-but-blank one. Downstream that
-        # keeps every value a str and lets COUNT(col) skip a missing field.
-        rows = [{c: ("" if r.get(c) is None else r[c]) for c in fields} for r in reader]
+        # DictReader leaves a short row's fields None and parks a long row's
+        # surplus under a None key. Normalise both, so every value downstream is
+        # a str and a missing field reads as a written-but-blank one.
+        rows = [{c: r.get(c) or "" for c in fields} for r in reader]
         return _alias(token), fields, rows
 
 
@@ -265,12 +263,10 @@ def _order_value(target, query: Query, schema: Schema):
     if isinstance(target, str):
         for item in query.columns:
             if isinstance(item, Alias) and item.name == target:
-                # An alias resolves exactly once. What it renamed is written in
-                # terms of the *input* columns, so it is resolved against the
-                # schema rather than looked up as an alias again. Resolving
-                # again would not terminate for a self-referential alias
-                # (SELECT age AS age ... ORDER BY age) or a swapped pair
-                # (SELECT a AS b, b AS a ... ORDER BY a).
+                # An alias resolves exactly once, against the schema: what it
+                # renamed is written in terms of the input columns. Going
+                # through the alias table again would not terminate for
+                # SELECT age AS age, or for a swapped a AS b, b AS a.
                 inner = _item_expr(item)
                 if isinstance(inner, str):
                     key = schema.resolve(inner)
