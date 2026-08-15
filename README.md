@@ -128,14 +128,17 @@ Three stages, one per file:
 
 ## Test
 
+The property tests need `hypothesis`, so install it alongside pytest:
+
 ```bash
+pip install pytest hypothesis
 python -m pytest
 ```
 
 or, without a local pytest:
 
 ```bash
-uv run --with pytest python -m pytest
+uv run --with pytest --with hypothesis python -m pytest
 ```
 
 ## Not done yet
