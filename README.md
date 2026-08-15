@@ -5,18 +5,21 @@
 [![Ruff](https://img.shields.io/badge/lint-ruff-blue.svg)](https://github.com/astral-sh/ruff)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A small SQL query engine over CSV files, in Python.
+A hand-written SQL query engine, in about 1,500 lines of Python with no
+dependencies. Text goes in one end and rows come out the other, through the two
+halves every query engine has: a parser that turns SQL into a tree, and an
+executor that runs that tree as a pipeline of operators.
 
-quarry reads one or two CSV files and runs a subset of SQL over them: `SELECT`
-(with `DISTINCT` and `AS` aliases), `WHERE`, a two-table `INNER` or `LEFT JOIN`,
-`GROUP BY` with `HAVING`, `ORDER BY` and `LIMIT`, over an expression language
-with arithmetic, six scalar functions, and `IN`, `LIKE` and `BETWEEN`. The full
-list is below. It uses the standard library only. It exists as a readable
-version of the two halves of a query engine, a parser and an executor, with
-nothing hidden behind a framework.
+It reads CSV because that is the least interesting choice available. The point is
+the machinery in between, written out in three files you can read in a sitting,
+with nothing behind a framework and no query planner deciding things off stage.
+
+If you want to query a CSV file, use [sift](https://github.com/martin-k-m/sift)
+or DuckDB, which are faster and will stay faster. quarry is here to be read.
 
 It pairs with [strata](https://github.com/martin-k-m/strata), an LSM storage
-engine. strata stores rows, quarry reads them.
+engine written the same way. strata is the half that stores rows and survives a
+crash; quarry is the half that asks for them.
 
 ## Use
 
@@ -40,6 +43,38 @@ prints the same aligned table the one-shot mode does. A query that fails prints
 the error and the prompt stays open, so a typo does not end the session. Blank
 lines are ignored. Quit with `.exit` or Ctrl-D. Line editing comes from
 `readline` when the platform has it, but it is not required.
+
+## How it works
+
+Three stages, one per file, and the file sizes are roughly the honest ratio of
+how hard each part is:
+
+- `lexer.py`, 128 lines. Turns the text into a flat stream of tokens. The
+  smallest and least interesting stage, which is the usual shape.
+- `parser.py`, 589 lines. Recursive descent, building a query tree. Precedence
+  is expressed as the nesting of the functions rather than as a table, so the
+  grammar is legible in the call structure.
+- `engine.py`, 728 lines. Runs the tree as a pipeline of operators: scan,
+  optional hash join, filter, group, sort, limit, project. Filter and limit
+  stream row by row. The sort and the join build side are the steps that have to
+  see every input row before they can produce the first output row, which is the
+  distinction that decides what a query engine can do on a file bigger than
+  memory.
+
+Two things worth reading for, because they are where the bodies are buried:
+
+- **Expression evaluation** in `engine.py`. Every operator that takes an
+  expression shares it, so `WHERE`, `HAVING`, `ORDER BY` and a projected column
+  are the same evaluator under different names. Aliases resolve exactly once,
+  which sounds obvious and was a real bug: an alias shadowing a column name
+  recursed until the stack ran out.
+- **The depth guard** in `parser.py`. Recursive descent on adversarial input is
+  a stack overflow waiting to happen, so nesting is capped at 100 and reported
+  as a query error rather than a `RecursionError`. A property test found that
+  one too.
+
+Both of those, and the two other defects the test suite caught, are written up
+in the tests rather than smoothed over.
 
 ## What it supports
 
@@ -114,17 +149,6 @@ lines are ignored. Quit with `.exit` or Ctrl-D. Line editing comes from
 Aggregate output columns are named predictably: `COUNT(*)` is `count`, and every
 other aggregate is `func(col)` lowercased, so `SUM(age)` is `sum(age)` and
 `MIN(name)` is `min(name)`. Use those names in `ORDER BY`.
-
-## How it works
-
-Three stages, one per file:
-
-- `lexer.py` turns the text into a flat stream of tokens.
-- `parser.py` is a recursive-descent parser that builds a query tree.
-- `engine.py` runs that tree as a pipeline of operators: scan, optional hash
-  join, filter, sort, limit, project. Filter and limit stream row by row. The
-  sort and the join build side are the steps that have to see every input row
-  before they can produce the first output row.
 
 ## Test
 
