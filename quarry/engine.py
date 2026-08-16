@@ -137,7 +137,11 @@ def _load(token: str, base_dir: str) -> tuple[str, list[str], list[dict[str, str
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         fields = list(reader.fieldnames or [])
-        return _alias(token), fields, list(reader)
+        # DictReader leaves a short row's fields None and parks a long row's
+        # surplus under a None key. Normalise both, so every value downstream is
+        # a str and a missing field reads as a written-but-blank one.
+        rows = [{c: r.get(c) or "" for c in fields} for r in reader]
+        return _alias(token), fields, rows
 
 
 def _build_source(query: Query, base_dir: str):
@@ -259,7 +263,15 @@ def _order_value(target, query: Query, schema: Schema):
     if isinstance(target, str):
         for item in query.columns:
             if isinstance(item, Alias) and item.name == target:
-                return _order_value(_item_expr(item), query, schema)
+                # An alias resolves exactly once, against the schema: what it
+                # renamed is written in terms of the input columns. Going
+                # through the alias table again would not terminate for
+                # SELECT age AS age, or for a swapped a AS b, b AS a.
+                inner = _item_expr(item)
+                if isinstance(inner, str):
+                    key = schema.resolve(inner)
+                    return lambda r: r[key]
+                return lambda r: _value(inner, r, schema)
         key = schema.resolve(target)
         return lambda r: r[key]
     # An expression node (Column, BinOp, Neg, Literal).

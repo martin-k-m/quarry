@@ -151,24 +151,29 @@ def render_expr(node) -> str:
         f = float(node.value)
         return str(int(f)) if f.is_integer() else repr(f)
     if isinstance(node, Neg):
-        return f"-{_render_child(node.operand, 3, False)}"
+        # Unary minus binds tighter than any binary operator, so an arithmetic
+        # operand always needs parens: -(a + b) must not render as -a + b.
+        inner = render_expr(node.operand)
+        return f"-({inner})" if isinstance(node.operand, BinOp) else f"-{inner}"
     if isinstance(node, Func):
         return f"{node.name.upper()}({', '.join(render_expr(a) for a in node.args)})"
     if isinstance(node, BinOp):
-        left = _render_child(node.left, _PREC[node.op], False)
-        right = _render_child(node.right, _PREC[node.op], True)
+        left = _render_child(node.left, node.op, False)
+        right = _render_child(node.right, node.op, True)
         return f"{left} {node.op} {right}"
     return str(node)
 
 
-def _render_child(child, parent_prec: int, is_right: bool) -> str:
+def _render_child(child, parent_op: str, is_right: bool) -> str:
     text = render_expr(child)
     if isinstance(child, BinOp):
+        parent_prec = _PREC[parent_op]
         cp = _PREC[child.op]
-        # Parenthesise a child that binds looser than its parent, or an equal
-        # one on the right of a non-associative operator, so a - (b - c) and
-        # (a + b) * c keep their shape.
-        if cp < parent_prec or (cp == parent_prec and is_right and child.op in "-/"):
+        # Parenthesise a child that binds looser than its parent, or one of
+        # equal precedence on the right of - or /, which do not associate:
+        # a - (b + c) and a / (b * c) both need the parens. Whether they are
+        # needed is a property of the parent operator, not the child's.
+        if cp < parent_prec or (cp == parent_prec and is_right and parent_op in "-/"):
             return f"({text})"
     return text
 
