@@ -133,8 +133,10 @@ in the tests rather than smoothed over.
   `MAX(col)`, with `GROUP BY` over one or more columns and an optional `HAVING`
   predicate. With an aggregate but no `GROUP BY`, the whole file is one group.
   `COUNT(*)` counts rows; `COUNT(col)` ignores empty values. `SUM` and `AVG`
-  are numeric and skip non-numeric values. `MIN`/`MAX` are numeric when the
-  column is all numbers, lexical otherwise. A plain column in the SELECT list
+  are numeric and skip non-numeric values. `MIN`/`MAX` ignore empty values too,
+  and are numeric when every value that is left is a number, lexical otherwise:
+  a column of numbers with a blank in it still compares numerically, and a
+  blank is never the answer while a real value is present. A plain column in the SELECT list
   of an aggregate query must also appear in `GROUP BY`.
 - Ragged CSV rows. A row with fewer fields than the header reads its missing
   fields as the empty string, the same value a written-but-blank field has, and
