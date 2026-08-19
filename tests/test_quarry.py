@@ -824,6 +824,17 @@ def test_min_max_avg_over_only_blank_values_are_blank(tmp_path):
     assert rows == [{"m": "", "x": "", "v": ""}]
 
 
+def test_min_max_ignore_blanks_among_real_values(tmp_path):
+    # The blank is skipped rather than being the smallest value, which is what
+    # makes a column of numbers and a blank still count as numeric here: 5
+    # rather than 40 as a lexical minimum, and "a" rather than "".
+    (tmp_path / "t.csv").write_text("n,s\n,x\n5,a\n40,b\n", encoding="utf-8")
+    _, rows = run("SELECT MIN(n) AS m, MAX(n) AS x FROM t", str(tmp_path))
+    assert rows == [{"m": "5", "x": "40"}]
+    _, rows = run("SELECT MIN(s) AS m, MAX(s) AS x FROM t", str(tmp_path))
+    assert rows == [{"m": "a", "x": "x"}]
+
+
 def test_aggregate_order_by_must_be_a_selected_output(data):
     with pytest.raises(QueryError, match="not a selected output column"):
         run("SELECT city, COUNT(*) AS c FROM people GROUP BY city ORDER BY SUM(age)", data)
