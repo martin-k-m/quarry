@@ -200,6 +200,19 @@ uv run --with pytest --with hypothesis python -m pytest
 - Arithmetic in `ORDER BY` works on a row query, not on a grouped one; an
   aggregate query still sorts on a selected output column by name.
 
+## Related
+
+Four small tools that each do one thing to a table of data, and are written to
+be read rather than to compete with DuckDB:
+
+- [csvpeek](https://github.com/martin-k-m/csvpeek) profiles a file: column
+  types, null counts, distributions.
+- [sift](https://github.com/martin-k-m/sift) queries one: filter, sort,
+  aggregate, in one pass where it can.
+- [drift](https://github.com/martin-k-m/drift) diffs two of them, in Rust.
+- **quarry** is the long way round, a hand-written SQL parser and executor
+  meant to be read.
+
 ## License
 
 MIT
