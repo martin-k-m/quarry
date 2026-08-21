@@ -24,11 +24,23 @@ crash; quarry is the half that asks for them.
 ## Use
 
 ```bash
-python -m quarry "SELECT name, age FROM people.csv WHERE age > 40 ORDER BY age DESC LIMIT 5"
+python -m quarry "SELECT name, age FROM 'examples/people.csv' WHERE age > 40 ORDER BY age DESC LIMIT 5"
+```
+
+```
+name  age
+----  ---
+eve   62
+cara  51
+ada   44
+
+(3 rows)
 ```
 
 A table name written without a path is resolved to `name.csv` in the working
-directory. Quote a path that contains a dot or a slash.
+directory, so `FROM people` reads `people.csv` from where you are standing.
+Anything containing a dot or a slash is not a bare name and has to be quoted,
+which is why the path above is in single quotes.
 
 ## Interactive
 
@@ -51,10 +63,10 @@ how hard each part is:
 
 - `lexer.py`, 128 lines. Turns the text into a flat stream of tokens. The
   smallest and least interesting stage, which is the usual shape.
-- `parser.py`, 589 lines. Recursive descent, building a query tree. Precedence
+- `parser.py`, 588 lines. Recursive descent, building a query tree. Precedence
   is expressed as the nesting of the functions rather than as a table, so the
   grammar is legible in the call structure.
-- `engine.py`, 728 lines. Runs the tree as a pipeline of operators: scan,
+- `engine.py`, 724 lines. Runs the tree as a pipeline of operators: scan,
   optional hash join, filter, group, sort, limit, project. Filter and limit
   stream row by row. The sort and the join build side are the steps that have to
   see every input row before they can produce the first output row, which is the
