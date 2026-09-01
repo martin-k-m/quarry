@@ -166,17 +166,20 @@ other aggregate is `func(col)` lowercased, so `SUM(age)` is `sum(age)` and
 
 ## Test
 
-The property tests need `hypothesis`, so install it alongside pytest:
+The test tools — pytest, ruff, and the `hypothesis` the property tests need —
+are the `dev` group in `pyproject.toml`, so there is one list rather than one
+per place that installs them:
 
 ```bash
-pip install pytest hypothesis
-python -m pytest
+uv sync --group dev
+uv run pytest
 ```
 
-or, without a local pytest:
+or with pip, which needs 25.1 or newer for `--group`:
 
 ```bash
-uv run --with pytest --with hypothesis python -m pytest
+python -m pip install --group dev
+python -m pytest
 ```
 
 ## Not done yet

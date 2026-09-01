@@ -15,6 +15,16 @@ quarry = "quarry.__main__:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[dependency-groups]
+# The tools the tests and the lint gate need, in one place.
+#
+# Without this, `uv sync` installed nothing beyond the (empty) runtime
+# dependencies and `uv run pytest` failed with "Failed to spawn: pytest" — the
+# command the repository's own instructions tell you to run. CI worked because
+# it named the same three tools again in a pip line, which is two lists that
+# had no way of staying equal.
+dev = ["pytest>=8", "ruff>=0.6", "hypothesis>=6"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
